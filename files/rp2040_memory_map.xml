@@ -1,0 +1,7 @@
+<memory-map>
+	<memory type="ram" start="0x00000000" length="0x10000000"/>
+	<memory type="flash" start="0x10000000" length="0x200000">
+		<property name="blocksize">0x1000</property>
+	</memory>
+	<memory type="ram" start="0x10200000" length="0xefe00000"/>
+</memory-map>

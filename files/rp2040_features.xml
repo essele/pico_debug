@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!DOCTYPE target SYSTEM "gdb-target.dtd">
+<target version="1.0">
+<architecture>arm</architecture>
+<feature name="org.gnu.gdb.arm.m-profile">
+<reg name="r0" bitsize="32" regnum="0" save-restore="yes" type="int" group="general"/>
+<reg name="r1" bitsize="32" regnum="1" save-restore="yes" type="int" group="general"/>
+<reg name="r2" bitsize="32" regnum="2" save-restore="yes" type="int" group="general"/>
+<reg name="r3" bitsize="32" regnum="3" save-restore="yes" type="int" group="general"/>
+<reg name="r4" bitsize="32" regnum="4" save-restore="yes" type="int" group="general"/>
+<reg name="r5" bitsize="32" regnum="5" save-restore="yes" type="int" group="general"/>
+<reg name="r6" bitsize="32" regnum="6" save-restore="yes" type="int" group="general"/>
+<reg name="r7" bitsize="32" regnum="7" save-restore="yes" type="int" group="general"/>
+<reg name="r8" bitsize="32" regnum="8" save-restore="yes" type="int" group="general"/>
+<reg name="r9" bitsize="32" regnum="9" save-restore="yes" type="int" group="general"/>
+<reg name="r10" bitsize="32" regnum="10" save-restore="yes" type="int" group="general"/>
+<reg name="r11" bitsize="32" regnum="11" save-restore="yes" type="int" group="general"/>
+<reg name="r12" bitsize="32" regnum="12" save-restore="yes" type="int" group="general"/>
+<reg name="sp" bitsize="32" regnum="13" save-restore="yes" type="data_ptr" group="general"/>
+<reg name="lr" bitsize="32" regnum="14" save-restore="yes" type="int" group="general"/>
+<reg name="pc" bitsize="32" regnum="15" save-restore="yes" type="code_ptr" group="general"/>
+<reg name="xPSR" bitsize="32" regnum="16" save-restore="yes" type="int" group="general"/>
+</feature>
+<feature name="org.gnu.gdb.arm.m-system">
+<reg name="msp" bitsize="32" regnum="17" save-restore="yes" type="data_ptr" group="system"/>
+<reg name="psp" bitsize="32" regnum="18" save-restore="yes" type="data_ptr" group="system"/>
+<reg name="primask" bitsize="1" regnum="20" save-restore="yes" type="int8" group="system"/>
+<reg name="basepri" bitsize="8" regnum="21" save-restore="yes" type="int8" group="system"/>
+<reg name="faultmask" bitsize="1" regnum="22" save-restore="yes" type="int8" group="system"/>
+<reg name="control" bitsize="3" regnum="23" save-restore="yes" type="int8" group="system"/>
+</feature>
+</target>

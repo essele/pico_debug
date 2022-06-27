@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<threads>
+	<thread id="1">Name: rp2040.core0, state: undefined</thread>
+	<thread id="2">Name: rp2040.core1, state: undefined</thread>
+</threads>
