@@ -568,7 +568,7 @@ int ap_write(int apnum, uint32_t addr, uint32_t value) {
  */
 static inline int ap_mem_set_csr(uint32_t value) {
     static uint32_t ap_mem_csr_cache = 0xffffffff;
-    int rc;
+    int rc = SWD_OK;
 
     if (ap_mem_csr_cache != value) {
         ap_mem_csr_cache = value;
@@ -593,18 +593,9 @@ static inline int ap_mem_set_csr(uint32_t value) {
 
 int mem_read(uint32_t addr, uint32_t *res) {
     int rc;
-    uint32_t    csw = 
-                          (1<<31)               // DBGSWENABLE
-                        | (1<<29)               // AHB MASTER DEBUG
-                        | (1<<25)               // HPROT1
-                        | (0<<4)                // incr-none
-                        | 2                     // 32bit
-                        ;
-
     // Control/Status word in the mem AP...
     rc = ap_mem_set_csr(AP_MEM_CSW_SINGLE);
 
-//    rc = ap_write(0, 0x00, csw|(0 << 4)|2);     // incr-none | 32bit
     if (rc != SWD_OK) return rc;
 
     // Set the adress
@@ -612,8 +603,24 @@ int mem_read(uint32_t addr, uint32_t *res) {
     if (rc != SWD_OK) return rc;
 
     rc = ap_read(0, 0x0c, res);
-    if (rc != SWD_OK) return rc;
+    return rc;
 }
+int mem_write(uint32_t addr, uint32_t value) {
+    int rc;
+    // Control/Status word in the mem AP...
+    rc = ap_mem_set_csr(AP_MEM_CSW_SINGLE);
+
+    if (rc != SWD_OK) return rc;
+
+    // Set the adress
+    rc = ap_write(0, 0x04, addr);
+    if (rc != SWD_OK) return rc;
+
+    rc = ap_write(0, 0x0c, value);
+    return rc;
+}
+
+
 
 int mem_read_block(uint32_t addr, uint32_t count, uint32_t *dest) {
     int rc;
@@ -645,7 +652,7 @@ volatile int ret;
 
 static volatile uint32_t xx;
 static volatile uint32_t id;
-static volatile uint32_t rc;
+//static volatile uint32_t rc;
 
 uint32_t buffer[100];
 
@@ -663,14 +670,185 @@ int dp_init() {
 }
 
 
-int swd_test()
-{
-    // Take us to 150Mhz (for future rmii support)
-    set_sys_clock_khz(150 * 1000, true);
+#define DCB_DHCSR       0xE000EDF0
+#define DCB_DCRSR       0xE000EDF4
+#define DCB_DCRDR       0xE000EDF8
+#define DCB_DEMCR       0xE000EDFC
+#define DCB_DSCSR       0xE000EE08
+
+#define NVIC_AIRCR      0xE000ED0C
 
 
+/**
+ * @brief Read a core register ... we already assume we are in debug state
+ * 
+ * @param reg 
+ * @param res 
+ * @return int 
+ */
+int reg_read(int reg, uint32_t *res) {
+    int rc;
+    uint32_t value;
+
+    rc = mem_write(DCB_DCRSR, (0 << 16) | (reg & 0x1f));
+    if (rc != SWD_OK) return rc;
+
+    // We are supposed to wait for the reg ready flag ... but it seems we don't
+    // need it?
+    while (1) {
+        rc = mem_read(DCB_DHCSR, &value);
+        if (rc != SWD_OK) return rc;
+        if (value & 0x00010000) break;
+    }
+    rc = mem_read(DCB_DCRDR, res);
+    return rc;
+}
+int reg_write(int reg, uint32_t value) {
+    int rc;
+
+    // Write the data into the RDR
+    rc = mem_write(DCB_DCRDR, value);
+    if (rc != SWD_OK) return rc;
+
+    // Now write the reg number
+    rc = mem_write(DCB_DCRSR, (1 << 16) | (reg & 0x1f));
+    if (rc != SWD_OK) return rc;
+
+    // Now wait until it's done
+    while (1) {
+        rc = mem_read(DCB_DHCSR, &value);
+        if (rc != SWD_OK) return rc;
+        if (value & 0x00010000) break;
+    }
+    return SWD_OK;
+}
+
+int core_enable_debug() {
+    return mem_write(DCB_DHCSR, (0xA05F << 16) | 1);
+}
+
+int core_halt() {
+    int rc;
+    uint32_t value;
+
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
+    if (rc != SWD_OK) return rc;
+    while (1) {
+        rc = mem_read(DCB_DHCSR, &value);
+        if (rc != SWD_OK) return rc;
+        if (value & 0x00020000) break;
+    }
+    return SWD_OK;
+}
+
+int core_unhalt() {
+    int rc;
+
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
+    if (rc != SWD_OK) return rc;
+    return SWD_OK;
+    // TODO: more?
+}
+
+int core_step() {
+    int rc;
+    uint32_t value;
+
+    // step and !halt...
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<2) | (0<<1) | 1);
+    if (rc != SWD_OK) return rc;
+
+    // Now wait for a halt again...
+    while (1) {
+        rc = mem_read(DCB_DHCSR, &value);
+        if (rc != SWD_OK) return rc;
+        if (value & 0x00020000) break;
+    }
+    return SWD_OK;
+}
+
+int core_is_halted() {
+    int rc;
+    uint32_t value;
+
+    rc = mem_read(DCB_DHCSR, &value);
+    if (rc != SWD_OK) return 0;
+    if (value & 0x00020000) return 1;
+    return 0;
+}
+
+/**
+ * @brief Reset the core but stop it from executing any instructions
+ * 
+ * @return int 
+ */
+int core_reset_halt() {
+    int rc;
+    uint32_t value;
+
+    // First halt the core...
+    core_halt();
+
+    // Now set the DWTENA and VC_CORERESET bits...
+    rc = mem_write(DCB_DEMCR, (1<<24) | (1 << 0));
+    if (rc != SWD_OK) return rc;
+
+    // Now reset the core (will be caught by the above)
+    rc = mem_write(NVIC_AIRCR, (0x05FA << 16) | (1 << 2));
+
+    // Now make sure we get a reset flag....
+    while (1) {
+        rc = mem_read(DCB_DHCSR, &value);
+        if (rc != SWD_OK) return rc;
+        if (value & (1<<25)) break;
+    }
+
+    // Then make sure it clears...
+    while (1) {
+        rc = mem_read(DCB_DHCSR, &value);
+        if (rc != SWD_OK) return rc;
+        if (!(value & (1<<25))) break;
+    }
+
+    // Now clear the CORERESET bit...
+    rc = mem_write(DCB_DEMCR, (1<<24) | (0 << 0));
+    return rc;
+}
+
+int swd_test() {
     while (1) {
         sleep_ms(200);
+
+        core_enable_debug();
+        core_halt();
+
+        // Try to read r0
+
+        int i;
+        int rc;
+
+        rc = reg_read(0b01111, &id);        // debug return address
+        rc = reg_read(0b10001, &id);        // main stack pointer
+        rc = reg_read(0b10010, &id);        // process stack pointer
+        rc = reg_read(0b10000, &id);        // xPSR
+        rc = reg_read(0, &id);
+        rc = reg_read(1, &id);
+        rc = reg_read(2, &id);
+
+
+        rc = mem_write(DCB_DCRSR, (0 << 16) | (0));
+        if (rc != SWD_OK) panic("fail");
+       for (i=0; i < 10; i++) {
+            uint32_t v;
+
+            rc = mem_read(DCB_DHCSR, &v);
+            if (rc != SWD_OK) panic("fail");
+            if (v & 0x00010000) break;
+        }
+        id = i;
+        rc = mem_read(DCB_DCRDR, &id);
+        if (rc != SWD_OK) panic("fail");
+
 
 
         rc = ap_read(0, 0xFC, &id);
