@@ -605,6 +605,24 @@ int mem_read(uint32_t addr, uint32_t *res) {
     rc = ap_read(0, 0x0c, res);
     return rc;
 }
+
+int mem_read16(uint32_t addr, uint16_t *res) {
+    uint32_t v;
+    int rc;
+
+    rc = mem_read(addr & 0xfffffffc, &v);
+    if (rc != SWD_OK) return rc;
+
+    if (addr & 2) {
+        // This will be the high bits?
+        *res = (v >> 16);
+    } else {
+        *res = (v & 0xffff);
+    }
+    return SWD_OK;
+}
+
+
 int mem_write(uint32_t addr, uint32_t value) {
     int rc;
     // Control/Status word in the mem AP...
@@ -617,6 +635,23 @@ int mem_write(uint32_t addr, uint32_t value) {
     if (rc != SWD_OK) return rc;
 
     rc = ap_write(0, 0x0c, value);
+    return rc;
+}
+
+int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src) {
+    int rc;
+
+    rc = ap_mem_set_csr(AP_MEM_CSW_INC);
+    if (rc != SWD_OK) return rc;
+
+    // Set the starting address
+    rc = ap_write(0, 0x04, addr);
+    if (rc != SWD_OK) return rc;
+
+    while(count--) {
+        rc = ap_write(0, 0x0C, *src++);
+        if (rc != SWD_OK) return rc;
+    }
     return rc;
 }
 
@@ -772,7 +807,7 @@ int core_is_halted() {
     uint32_t value;
 
     rc = mem_read(DCB_DHCSR, &value);
-    if (rc != SWD_OK) return 0;
+    if (rc != SWD_OK) return -1;
     if (value & 0x00020000) return 1;
     return 0;
 }
@@ -815,7 +850,142 @@ int core_reset_halt() {
     return rc;
 }
 
+// this is 'M' 'u', 1 (version)
+#define BOOTROM_MAGIC 0x01754d
+#define BOOTROM_MAGIC_ADDR 0x00000010
+
+
+uint32_t rp2040_find_rom_func(char ch1, char ch2) {
+    uint16_t tag = (ch2 << 8) | ch1;
+
+    // First read the bootrom magic value...
+    uint32_t magic;
+    int rc;
+
+    rc = mem_read(BOOTROM_MAGIC_ADDR, &magic);
+    if (rc != SWD_OK) return 0;
+    if ((magic & 0xffffff) != BOOTROM_MAGIC) return 0;
+
+    // Now find the start of the table...
+    uint16_t v;
+    uint32_t tabaddr;
+    rc = mem_read16(BOOTROM_MAGIC_ADDR+4, &v);
+    if (rc != SWD_OK) return 0;
+    tabaddr = v;
+
+    // Now try to find our function...
+    uint16_t value;
+    do {
+        rc = mem_read16(tabaddr, &value);
+        if (rc != SWD_OK) return 0;
+        if (value == tag) {
+            rc = mem_read16(tabaddr+2, &value);
+            if (rc != SWD_OK) return 0;
+            return (uint32_t)value;
+        }
+        tabaddr += 4;
+    } while(value);
+    return 0;
+}
+
+
+int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
+    static uint32_t trampoline_addr = 0;
+    static uint32_t trampoline_end;
+    int rc;
+    uint32_t r0;
+
+    assert(argc <= 4);
+
+    // First get the trampoline address...
+    if (!trampoline_addr) {
+        trampoline_addr = rp2040_find_rom_func('D', 'T');
+        trampoline_end = rp2040_find_rom_func('D', 'E');
+        if (!trampoline_addr || !trampoline_end) return SWD_ERROR;
+    }
+
+    // Set the registers for the trampoline call...
+    // function in r7, args in r0, r1, r2, and r3, end in lr?
+    rc = reg_write(7, addr);
+    if (rc != SWD_OK) return rc;
+    for (int i=0; i < argc; i++) {
+        rc = reg_write(i, args[i]);
+        if (rc != SWD_OK) return rc;
+    }
+    
+
+    // Now set the PC to go to our address
+    rc = reg_write(15, trampoline_addr);
+    if (rc != SWD_OK) return rc;
+
+    // Put the end address in LR
+    rc = reg_write(14, trampoline_end);
+    if (rc != SWD_OK) return rc;
+
+    // Set the stack pointer to something sensible... (MSP)
+    rc = reg_write(17, 0x20040800);
+    if (rc != SWD_OK) return rc;
+
+    // Set xPSR for the thumb thingy...
+    rc = reg_write(16, (1 << 24));
+
+    rc = reg_read(0, &r0);
+    if (rc != SWD_OK) return rc;
+
+
+    rc = core_is_halted();
+    if (rc == -1) panic("aaarg!");
+    if (!rc) panic("core not halted");
+
+    // Now can we continue and just wait for a halt?
+    core_unhalt();
+    while(1) {
+        busy_wait_ms(2);
+        rc = core_is_halted();
+        if (rc == -1) panic("here");
+        if (rc) break;
+    }
+
+    // Bloody hell if we get here!
+    uint32_t regs[5];
+
+    for (int i=0; i < 5; i++) {
+        rc = reg_read(i, &regs[i]);
+        if (rc != SWD_OK) return rc;
+    }
+
+    // What is our pc
+    uint32_t pc;
+    rc = reg_read(15, &pc);
+    if (rc != SWD_OK) return rc;
+
+    return regs[0];
+}
+
+
+ __attribute__((noinline, section("mysec"))) int remote_func (int x) {
+    return x + 2;
+}
+
 int swd_test() {
+    extern char __start_mysec[];
+    extern char __stop_mysec[];
+
+    int length = (__stop_mysec - __start_mysec);
+    int rc;
+
+    rc = mem_write_block(0x20001000, length, (uint32_t *)__start_mysec);
+    if (rc != SWD_OK) panic("fail");
+
+    uint32_t args[1] = { 0x00100020 };
+
+    rc = rp2040_call_function(0x20001000, args, 1);
+    if (rc != SWD_OK) panic("fail");
+    return 0;
+}
+
+
+int Xswd_test() {
     while (1) {
         sleep_ms(200);
 

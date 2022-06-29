@@ -267,6 +267,17 @@ void function_put_reg(char *packet) {
     }
 }
 
+char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two) {
+    char *sep;
+    char *end;
+
+    *one = strtoul(packet, &sep, 16);
+    if (*sep != sepch) return NULL;
+    *two = strtoul(sep+1, &end, 16);
+    return end;
+}
+
+
 void function_memread(char *packet) {
     char *sep;
     uint32_t addr;
@@ -377,6 +388,18 @@ error:
     gdb_error(1);
 }
 
+void function_vflash_erase(char *packet) {
+    uint32_t start, length;
+    char *p = get_two_hex_numbers(packet, ',', &start, &length);
+
+    if (!p || !length) {
+        gdb_error(1);
+        return;
+    }
+
+
+}
+
 
 void process_packet(char *packet, int packet_size) {
     // TODO: checksum
@@ -438,6 +461,8 @@ void process_packet(char *packet, int packet_size) {
         function_vcont(packet+5);
     } else if (strncmp(packet, "qRcmd,", 6) == 0) {
         function_rcmd(packet+6, packet_size-6);
+    } else if (strncmp(packet, "vFlashErase:", 12) == 0) {
+        function_vflash_erase(packet+12);
     } else {
         // Not supported...
         send_packet(NULL, 0);
@@ -479,8 +504,21 @@ int main() {
     core_enable_debug();
     core_halt();
 
-    tusb_init();
+//    tusb_init();
     gdb_init();
+
+    sleep_ms(100);
+    if (core_reset_halt() != SWD_OK) panic("failed reset");
+    sleep_ms(10);
+
+
+    swd_test();
+
+    uint32_t revaddr = rp2040_find_rom_func('R', '3');
+    uint32_t args[1] = { 0x11002233 };
+
+    uint32_t xx = rp2040_call_function(revaddr, args, 1);
+
 
     while(1) {
         busy_wait_ms(10);
