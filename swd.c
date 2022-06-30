@@ -3,6 +3,7 @@
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 
+#pragma GCC optimize ("O0")
 
 
 #include "hardware/pio.h"
@@ -202,7 +203,7 @@ static void swd_targetsel(uint32_t target) {
  * @param result 
  * @return int 
  */
-static int swd_read(int APnDP, int addr, uint32_t *result) {
+static int _swd_read(int APnDP, int addr, uint32_t *result) {
     uint32_t ack;
     uint32_t res;
     uint32_t parity, p;
@@ -256,6 +257,14 @@ static int swd_read(int APnDP, int addr, uint32_t *result) {
     swd_short_output(1, 0);
     return SWD_OK;    
 }
+static int swd_read(int APnDP, int addr, uint32_t *result) {
+    int rc;
+
+    do {
+        rc = _swd_read(APnDP, addr, result);
+    } while (rc == SWD_WAIT);
+    return rc;
+}
 
 /**
  * @brief Perform an SWD write operation
@@ -267,7 +276,7 @@ static int swd_read(int APnDP, int addr, uint32_t *result) {
  * @param result 
  * @return int 
  */
-static int swd_write(int APnDP, int addr, uint32_t value) {
+static int _swd_write(int APnDP, int addr, uint32_t value) {
     uint32_t ack;
 
     // We care about 4 bits for parity, 0=WR, APnDP, A3/2
@@ -315,7 +324,14 @@ static int swd_write(int APnDP, int addr, uint32_t value) {
     }
     return SWD_OK;    
 }
+static int swd_write(int APnDP, int addr, uint32_t value) {
+    int rc;
 
+    do {
+        rc = _swd_write(APnDP, addr, value);
+    } while (rc == SWD_WAIT);
+    return rc;
+}
 
 /**
  * @brief This sends an arbitary number of bits to the target
@@ -641,6 +657,14 @@ int mem_write(uint32_t addr, uint32_t value) {
 int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src) {
     int rc;
 
+    for (int i=0; i < count; i++) {
+        rc = mem_write(addr, *src++);
+        if (rc != SWD_OK) return rc;
+        addr += 4;
+    }
+    return SWD_OK;
+
+    // Auto increment isues?
     rc = ap_mem_set_csr(AP_MEM_CSW_INC);
     if (rc != SWD_OK) return rc;
 
@@ -766,7 +790,8 @@ int core_halt() {
     int rc;
     uint32_t value;
 
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<1) | 1);
+//    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
     if (rc != SWD_OK) return rc;
     while (1) {
         rc = mem_read(DCB_DHCSR, &value);
@@ -779,10 +804,19 @@ int core_halt() {
 int core_unhalt() {
     int rc;
 
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
+//    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
     return SWD_OK;
     // TODO: more?
+}
+
+int core_unhalt_with_masked_ints() {
+    int rc;
+
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
+    if (rc != SWD_OK) return rc;
+    return SWD_OK;
 }
 
 int core_step() {
@@ -790,7 +824,8 @@ int core_step() {
     uint32_t value;
 
     // step and !halt...
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<2) | (0<<1) | 1);
+    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<2) | (0<<1) | 1);
+//    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<2) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
 
     // Now wait for a halt again...
@@ -807,6 +842,10 @@ int core_is_halted() {
     uint32_t value;
 
     rc = mem_read(DCB_DHCSR, &value);
+
+    if (rc != SWD_OK) {
+        panic("HERE");
+    }
     if (rc != SWD_OK) return -1;
     if (value & 0x00020000) return 1;
     return 0;
@@ -849,6 +888,46 @@ int core_reset_halt() {
     rc = mem_write(DCB_DEMCR, (1<<24) | (0 << 0));
     return rc;
 }
+
+#define BPCR        0xE0002000
+static uint32_t breakpoints[4] = { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
+static const uint32_t bp_reg[4] = { 0xE0002008, 0xE000200C, 0xE0002010, 0xE0002014 };
+
+int bp_find(uint32_t addr) {
+    for (int i=0; i < 4; i++) {
+        if (breakpoints[i] == addr) return i;
+    }
+    return -1;
+}
+
+int bp_set(uint32_t addr) {
+    int rc;
+    int bp = bp_find(addr);
+    if (bp != -1) return SWD_OK;        // already have it
+    bp = bp_find(0xffffffff);
+    if (bp == -1) return SWD_ERROR;     // no slots available
+
+    // Set the breakpoint...
+    breakpoints[bp] = addr;
+    rc = mem_write(bp_reg[bp], 0xC0000000 | (addr & 0xfffffffc) | (1));
+    if (rc != SWD_OK) return rc;
+
+    // Turn on the breakpoint system...
+    rc = mem_write(BPCR, (1<<1) | 1);
+    return rc;
+}
+
+int bp_clr(uint32_t addr) {
+    int rc;
+
+    int bp = bp_find(addr);
+    if (bp == -1) return SWD_OK;        // we don't have it? Error?
+    breakpoints[bp] = 0xffffffff;
+    rc = mem_write(bp_reg[bp], 0);      // fully disabled
+    return rc;
+}
+
+
 
 // this is 'M' 'u', 1 (version)
 #define BOOTROM_MAGIC 0x01754d
@@ -939,6 +1018,7 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
 
     // Now can we continue and just wait for a halt?
     core_unhalt();
+//    core_unhalt_with_masked_ints();
     while(1) {
         busy_wait_ms(2);
         rc = core_is_halted();
@@ -946,6 +1026,8 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
         if (rc) break;
     }
 
+
+/*
     // Bloody hell if we get here!
     uint32_t regs[5];
 
@@ -958,8 +1040,8 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
     uint32_t pc;
     rc = reg_read(15, &pc);
     if (rc != SWD_OK) return rc;
-
-    return regs[0];
+    */
+   return SWD_OK;
 }
 
 

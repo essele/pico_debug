@@ -18,6 +18,8 @@ add_executable(pico-debug
     id_usb.c
     tusb_config.h
 
+    circ.h
+
     filedata.c filedata.h
 
     files/rp2040_features.xml

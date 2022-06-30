@@ -26,6 +26,7 @@ int swd_test();
 int mem_read_block(uint32_t addr, uint32_t count, uint32_t *dest);
 int mem_read(uint32_t addr, uint32_t *res);
 int mem_write(uint32_t addr, uint32_t value);
+int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src);
 
 int core_enable_debug();
 int core_halt();
@@ -39,5 +40,8 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc);
 
 int reg_read(int reg, uint32_t *res);
 int reg_write(int reg, uint32_t value);
+
+int bp_set(uint32_t addr);
+int bp_clr(uint32_t addr);
 
 #endif

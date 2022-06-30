@@ -20,20 +20,6 @@ static volatile uint32_t xx;
 static volatile uint32_t id;
 static volatile uint32_t rc;
 
-
-
-#define GDB_BUFFER_SIZE         16384
-
-
-static char gdb_buffer[GDB_BUFFER_SIZE+1];
-static char *gdb_bp;
-static char *gdb_mkr;       // end marker location
-static int gdb_blen;
-
-static int gdb_noack = 0;
-
-static int gdb_check_for_halt = 0;
-
 /**
  * @brief Output routine for usb_cdc_printf
  * 
@@ -66,6 +52,195 @@ static int usb_n_printf(int n, char *format, ...) {
 
 #define debug_printf(...)       usb_n_printf(1, __VA_ARGS__)
 #define gdb_printf(...)         usb_n_printf(0, __VA_ARGS__)
+
+
+
+static int hex_digit(char ch) {
+    static const char hex_digits[] = "0123456789abcdef";
+    char *i = index(hex_digits, tolower(ch));
+    if (!i) return -1;
+    return (int)(i - hex_digits);
+}
+
+int hex_byte(char *packet) {
+    int rc;
+    int v;
+
+    v = hex_digit(*packet++);
+    if (v == -1) return -1;
+    rc = v << 4;
+    v = hex_digit(*packet);
+    if (v == -1) return -1;
+    rc |= v;
+    return rc;
+}
+
+/**
+ * @brief Read in 8 chars and convert into a litte endian word
+ * 
+ */
+uint32_t hex_word_le32(char *packet) {
+    uint32_t rc = 0;
+    int v;
+
+    for (int i=0; i < 4; i++) {
+        rc >>= 8;
+        int v= hex_byte(packet);
+        if (v == -1) return 0xffffffff;
+        packet += 2;
+        rc |= (v << 24);
+    }
+    return rc;
+}
+
+uint32_t hex_word_be32(char *packet) {
+    uint32_t rc = 0;
+    int v;
+    for (int i=0; i < 8; i++) {
+        rc <<= 4;
+        int v = hex_digit(*packet++);
+        if (v == -1) return 0xffffffff;
+        rc |= v;
+    }
+    return rc;
+}
+
+
+
+/**
+ * Input mechanism -- needs to support both USB and Ethernet, and unfortunately
+ * one of those works as a pull and one as a push.
+ * 
+ * So... use a circular buffer for input which we refill from usb and the ethernet
+ * stack fills as packets come in.
+ * 
+ */
+
+#include "circ.h"
+#define XFER_CIRC_SIZE           2048
+CIRC_DEFINE(xfer, XFER_CIRC_SIZE);
+
+
+static int refill_from_usb() {
+    int count = 0;
+
+    if (!tud_cdc_connected()) return 0;
+
+    // If we go around the end we'll need to call this twice...
+    int space = circ_space_before_wrap(xfer);
+    if (space) {
+        int avail = tud_cdc_available();
+        if (avail) {
+            int size = MIN(space, avail);
+            count = tud_cdc_read(xfer->head, size);
+            circ_advance_head(xfer, count);
+        }
+    }
+    return count;
+}
+
+// State variables and return variables for build_packet
+enum {
+    BP_INIT = 0,        // get ready for a new packet
+    BP_START,           // waiting for the first char
+    BP_DATA,            // we've recevied the $ and are processing
+    BP_ESC,             // we've received the escape symbol (next is escaped)
+    BP_CHK1,            // first char of checksum
+    BP_CHK2,            // second char of checksum
+
+    // Return codes...
+    BP_ACK,
+    BP_NACK,
+    BP_INTR,
+    BP_PACKET,
+    BP_CORRUPT,
+    BP_GARBAGE,
+    BP_CHKSUM_FAIL,
+    BP_OVERFLOW,
+    BP_RUNNING,         // just running, all ok
+};
+
+#define GDB_BUFFER_SIZE         16384
+
+
+static char gdb_buffer[GDB_BUFFER_SIZE+1];
+static char *gdb_bp;
+static char *gdb_mkr;       // end marker location
+static int gdb_blen;
+
+static int gdb_noack = 0;
+
+static int gdb_check_for_halt = 0;
+
+
+
+static int build_packet() {
+    static int state = BP_INIT;
+    static uint8_t checksum;
+    int ch;
+
+    // For checking checkum...
+    static int supplied_sum;
+    int digit;
+
+
+    while((ch = circ_get_byte(xfer)) != -1) { 
+        switch(state) {
+            case BP_INIT:
+                gdb_bp = gdb_buffer;
+                gdb_blen = 0;
+                checksum = 0;
+                // fall through...
+
+            case BP_START:
+                if (ch == '+') return BP_ACK;
+                if (ch == '-') return BP_NACK;
+                if (ch == '$') { state = BP_DATA; break; }
+                if (ch == 0x3) return BP_INTR;
+                debug_printf("ch=%d\r\n", ch);
+                return BP_GARBAGE;
+
+            case BP_DATA:
+                if (ch == '#') { state = BP_CHK1; break; }
+                checksum += ch;
+                if (ch == '}') { state = BP_ESC; break; }
+                *gdb_bp++ = ch;
+                gdb_blen++;
+                break;
+
+            case BP_ESC:
+                checksum += ch;
+                *gdb_bp++ = ch ^ 0x20;
+                gdb_blen++;
+                state = BP_DATA;
+                break;
+
+            case BP_CHK1:
+                *gdb_bp++ = 0;      // zero terminate for ease later
+                digit = hex_digit(ch);
+                if (digit == -1) { state = BP_INIT; return BP_CORRUPT; }
+                supplied_sum = (digit << 4);
+                state = BP_CHK2;
+                break;
+
+            case BP_CHK2:
+                digit = hex_digit(ch);
+                if (digit == -1) { state = BP_INIT; return BP_CORRUPT; }
+                supplied_sum |= digit;
+                if (supplied_sum != checksum) { state = BP_INIT; return BP_CHKSUM_FAIL; }
+                state = BP_INIT;
+                return BP_PACKET;
+        }
+        if (gdb_blen == GDB_BUFFER_SIZE) {
+            debug_printf("BUFFER OVERFLOW\r\n");
+            return BP_OVERFLOW;
+        }
+    }
+    return BP_RUNNING;
+}
+
+
+
 
 static char gen_buffer[1024];
 
@@ -115,7 +290,10 @@ int gdb_error(int err) {
  * 
  * @return int 
  */
-int usb_read_poll() {
+
+
+
+int Xusb_read_poll() {
     int rc = USB_OK;
 
     // Wait for us to be connected...
@@ -229,7 +407,7 @@ void function_xfer_threads(char *packet) {
     free(out);
 }
 
-void function_get_sys_regs(int reg) {
+void function_get_sys_regs() {
     char buf[18*8];
     char *p = buf;
     
@@ -237,14 +415,22 @@ void function_get_sys_regs(int reg) {
             uint32_t rval;
             int rc;
 
-            if(reg != -1 && reg != i) continue;
-
             rc = reg_read(i, &rval);
             if (rc != SWD_OK) panic("reg read failed");
             sprintf(p, "%02x%02x%02x%02x", rval&0xff, (rval&0xff00)>>8, (rval&0xff0000)>>16, rval>>24);
             p += 8;
     }
     send_packet(buf, strlen(buf));
+}
+
+void function_get_reg(char *packet) {
+    char buf[9];
+    uint32_t rval;
+    int reg = strtoul(packet, NULL, 16);
+    int rc = reg_read(reg, &rval);
+    if (rc != SWD_OK) panic("reg read failed");
+    sprintf(buf, "%02x%02x%02x%02x", rval&0xff, (rval&0xff00)>>8, (rval&0xff0000)>>16, rval>>24);
+    send_packet(buf, 8);
 }
 
 void function_put_reg(char *packet) {
@@ -258,7 +444,7 @@ void function_put_reg(char *packet) {
         send_packet(NULL, 0);
         return;
     }
-    value = strtoul(sep+1, NULL, 16);
+    value = hex_word_le32(sep+1);
     rc = reg_write(reg, value);
     if (rc != SWD_OK) {
         gdb_error(1);
@@ -330,6 +516,45 @@ void function_memread(char *packet) {
     free(buffer);
 }
 
+
+void function_memwrite(char *packet) {
+    uint32_t addr, length;
+    int rc;
+    char *p = get_two_hex_numbers(packet, ',', &addr, &length);
+
+    if (!p || *p != ':'|| !length) {
+        send_packet(NULL, 0);
+        return;
+    }
+    if (addr & 3 || length & 3) {
+        debug_printf("ERROR: can't do unaligned and non word memory writes yet\r\n");
+        send_packet(NULL, 0);
+        return;
+    }
+    packet = p+1;
+
+    // Allocate enough space to process our incoming buffer...
+    uint8_t *buf = malloc(length);
+    if (!buf) panic("mem");
+
+    uint8_t *bp = buf;
+    // Now process our data...
+    for (int i=0; i < length; i++) {
+        *bp++ = hex_byte(packet);
+        packet += 2;
+    }
+
+    // And now write it...
+    rc = mem_write_block(addr, length >> 2, (uint32_t *)buf);
+    free(buf);
+    if (rc != SWD_OK) {
+        debug_printf("mem write failed\r\n");
+        send_packet(NULL, 0);
+        return;
+    }
+    send_packet("OK", 2);
+}
+
 void function_vcont(char *packet) {
     int rc;
 
@@ -388,32 +613,190 @@ error:
     gdb_error(1);
 }
 
+void function_XX() {
+    uint32_t addr;
+    int rc;
+
+    addr = rp2040_find_rom_func('I', 'F');  // connect_internal_flash
+    if (!addr) { debug_printf("unable to lookup IF\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute IF failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('F', 'C');  // flush cache
+    if (!addr) { debug_printf("unable to lookup FC\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute FC failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('C', 'X');  // enter_cmd_xip
+    if (!addr) { debug_printf("unable to lookup CX\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute CX failed\r\b"); return; }
+
+    send_packet("OK", 2);
+}
+
 void function_vflash_erase(char *packet) {
     uint32_t start, length;
+    uint32_t addr;
+    int rc;
     char *p = get_two_hex_numbers(packet, ',', &start, &length);
 
     if (!p || !length) {
         gdb_error(1);
         return;
     }
+    
+    addr = rp2040_find_rom_func('I', 'F');  // connect_internal_flash
+    if (!addr) { debug_printf("unable to lookup IF\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute IF failed\r\b"); return; }
 
+    addr = rp2040_find_rom_func('E', 'X');  // exit XIP
+    if (!addr) { debug_printf("unable to lookup EX\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute EX failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('R', 'E');  // range erage (addr, count, blksize, blkcommand)
+    if (!addr) { debug_printf("unable to lookup RE\r\n"); return; }
+    uint32_t args[4] = { start, length, (1 << 16), 0xd8 };
+    rc = rp2040_call_function(addr, args, 4);
+    if (rc != SWD_OK) { debug_printf("execute RE failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('F', 'C');  // flush cache
+    if (!addr) { debug_printf("unable to lookup FC\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute FC failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('C', 'X');  // enter_cmd_xip
+    if (!addr) { debug_printf("unable to lookup CX\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute CX failed\r\b"); return; }
+
+    send_packet("OK", 2);
 
 }
+
+// The write process will just write the data to the memory as a bit of a hack...
+// the done will actually process it...
+uint32_t vflash_ram = 0x20000000;
+uint32_t vflash_start = 0x10000000;
+uint32_t vflash_len = 0;
+
+void function_vflash_write(char *packet, int len) {
+    uint32_t start;
+    uint32_t addr;
+    int rc;
+
+    char *sep;
+    start = strtoul(packet, &sep, 16);
+    if (*sep != ':') {
+        debug_printf("expecting colon\r\n");
+        return;
+    }
+    sep++;
+    int delta = (int)(sep - packet);
+
+    packet += delta;
+    len -= delta;
+    debug_printf("writing %d bytes to flash at 0x%08x\r\n", len, start);
+
+    // Make sure our source data is word aligned...
+    char *p = malloc(len);
+    if (!p) panic("aarrgg");
+    memcpy(p, packet, len);
+
+    // Work out the equivalent ram location...
+    uint32_t loc = vflash_ram | (start & 0x00ffffff);
+
+    debug_printf("writing %d bytes into memory at %08x\r\n", len, loc);
+
+    // Now copy the data over...    
+    rc = mem_write_block(loc, len >> 2, (uint32_t *)p);
+    if (rc != SWD_OK) panic("fail here");
+    free(p);
+
+    // See if we need to increase our length...
+    uint32_t l = start + len;
+    l &= 0x00ffffff;
+
+    if (l > vflash_len) vflash_len = l;
+
+    send_packet("OK", 2);
+
+}
+
+void function_vflash_done() {
+    uint32_t addr;
+    int rc;
+
+    debug_printf("Really writing %d bytes to flash at 0x%08x\r\n", vflash_len, vflash_start);
+
+    addr = rp2040_find_rom_func('I', 'F');  // connect_internal_flash
+    if (!addr) { debug_printf("unable to lookup IF\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute IF failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('E', 'X');  // exit XIP
+    if (!addr) { debug_printf("unable to lookup EX\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute EX failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('R', 'P');  // range program (addr, src, count)
+    if (!addr) { debug_printf("unable to lookup RP\r\n"); return; }
+    uint32_t args[3] = { vflash_start, vflash_ram, vflash_len };
+    rc = rp2040_call_function(addr, args, 3);
+    if (rc != SWD_OK) { debug_printf("execute RP failed\r\b"); return; }
+    vflash_len = 0;
+
+    addr = rp2040_find_rom_func('F', 'C');  // flush cache
+    if (!addr) { debug_printf("unable to lookup FC\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute FC failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('F', 'C');  // flush cache
+    if (!addr) { debug_printf("unable to lookup FC\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute FC failed\r\b"); return; }
+
+    addr = rp2040_find_rom_func('C', 'X');  // enter_cmd_xip
+    if (!addr) { debug_printf("unable to lookup CX\r\n"); return; }
+    rc = rp2040_call_function(addr, NULL, 0);
+    if (rc != SWD_OK) { debug_printf("execute CX failed\r\b"); return; }
+
+    send_packet("OK", 2);
+
+}
+
+void function_add_breakpoint(char *packet) {
+    uint32_t addr, size;
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
+        debug_printf("bp set syntax\r\n");
+        return;
+    }
+    bp_set(addr);
+    send_packet("OK", 2);
+}
+void function_remove_breakpoint(char *packet) {
+    uint32_t addr, size;
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
+        debug_printf("bp clr syntax\r\n");
+        return;
+    }
+    bp_clr(addr);
+    send_packet("OK", 2);
+}
+
 
 
 void process_packet(char *packet, int packet_size) {
     // TODO: checksum
     if (!gdb_noack) gdb_printf("+");
 
-    if (packet[0] != '$') {
-        debug_printf("CORRUPT: %.*s\r\n", packet_size, packet);
-        return;
+    if (strncmp(packet, "vFlashWrite", 11) == 0) {
+        debug_printf("FLASH WRITE PACKET\r\n");
+    } else {
+        debug_printf("PKT [%.*s]\r\n", packet_size, packet);
     }
-    // Move past the $
-    packet++;
-    packet_size--;
-
-    debug_printf("PKT [%.*s]\r\n", (gdb_mkr - gdb_buffer) + 3, gdb_buffer);
 
     if (strncmp(packet, "qSupported:", 11) == 0) {
         function_qSupported();
@@ -448,21 +831,31 @@ void process_packet(char *packet, int packet_size) {
         send_packet((char *)offsets, sizeof(offsets)-1);
     } else if (strncmp(packet, "g", 1) == 0) {
         // Get all registers...
-        function_get_sys_regs(-1);
+        function_get_sys_regs();
     } else if (strncmp(packet, "m", 1) == 0) {
         function_memread(packet+1);
+    } else if (strncmp(packet, "M", 1) == 0) {
+        function_memwrite(packet+1);
     } else if (strncmp(packet, "p", 1) == 0) {
         // Read single register...
-        function_get_sys_regs(strtoul(packet+1, NULL, 16));
+        function_get_reg(packet+1);
     } else if (strncmp(packet, "P", 1) == 0) {
         // Write single reg...
-        function_put_reg(packet);
+        function_put_reg(packet+1);
+    } else if (strncmp(packet, "Z1,", 3) == 0) {
+        function_add_breakpoint(packet+3);
+    } else if (strncmp(packet, "z1,", 3) == 0) {
+        function_remove_breakpoint(packet+3);
     } else if (strncmp(packet, "vCont", 5) == 0) {
         function_vcont(packet+5);
     } else if (strncmp(packet, "qRcmd,", 6) == 0) {
         function_rcmd(packet+6, packet_size-6);
     } else if (strncmp(packet, "vFlashErase:", 12) == 0) {
         function_vflash_erase(packet+12);
+    } else if (strncmp(packet, "vFlashWrite:", 12) == 0) {
+        function_vflash_write(packet+12, packet_size-12);
+    } else if (strncmp(packet, "vFlashDone", 10) == 0) {
+        function_vflash_done();
     } else {
         // Not supported...
         send_packet(NULL, 0);
@@ -478,14 +871,34 @@ void process_packet(char *packet, int packet_size) {
     gdb_mkr = NULL;
 }
 
+void handle_intr() {
+    core_halt();
+    gdb_check_for_halt = 1;
+}
+
 
 int usb_poll() {
+    int rc;
+
     tud_task();
-    if (usb_read_poll() == USB_PACKET) {
-        int length = gdb_mkr - gdb_buffer;
-        process_packet(gdb_buffer, length);
+    refill_from_usb();
+    rc = build_packet();
+    if (rc != BP_RUNNING) {
+        switch(rc) {
+            case BP_PACKET:         process_packet(gdb_buffer, gdb_blen); break;
+            case BP_INTR:           handle_intr(); break;
+            case BP_CORRUPT:        debug_printf("CORRUPT\r\n"); break;
+            case BP_GARBAGE:        debug_printf("GARBAGE [%.*s]\r\n", gdb_blen, gdb_buffer); break;
+            case BP_ACK:            debug_printf("ACK\r\n"); break;
+            case BP_NACK:           debug_printf("NACK\r\n"); break;
+            case BP_CHKSUM_FAIL:    debug_printf("CHKSUM FAIL\r\n");
+            default:                debug_printf("RC=%d\r\n", rc);
+        }
     }
-//    usb_write_poll();
+//    if (usb_read_poll() == USB_PACKET) {
+//        int length = gdb_mkr - gdb_buffer;
+//        process_packet(gdb_buffer, length);
+//    }
 }
 
 
@@ -494,7 +907,7 @@ void gdb_init() {
     gdb_blen = 0;
 }
 
-int main() {
+    int main() {
     // Take us to 150Mhz (for future rmii support)
     set_sys_clock_khz(150 * 1000, true);
 
@@ -502,22 +915,24 @@ int main() {
     if (dp_init() != SWD_OK) panic("unable to init DP");
 
     core_enable_debug();
+    core_reset_halt();
+    core_unhalt();
+    sleep_ms(200);
     core_halt();
 
-//    tusb_init();
+    tusb_init();
     gdb_init();
 
-    sleep_ms(100);
-    if (core_reset_halt() != SWD_OK) panic("failed reset");
-    sleep_ms(10);
+//    sleep_ms(100);
+//    if (core_reset_halt() != SWD_OK) panic("failed reset");
+//    sleep_ms(10);
+//
+//    swd_test();
 
-
-    swd_test();
-
-    uint32_t revaddr = rp2040_find_rom_func('R', '3');
-    uint32_t args[1] = { 0x11002233 };
-
-    uint32_t xx = rp2040_call_function(revaddr, args, 1);
+//    uint32_t revaddr = rp2040_find_rom_func('R', '3');
+//    uint32_t args[1] = { 0x11002233 };
+//
+//    uint32_t xx = rp2040_call_function(revaddr, args, 1);
 
 
     while(1) {
