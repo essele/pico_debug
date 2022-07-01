@@ -657,13 +657,14 @@ int mem_write(uint32_t addr, uint32_t value) {
 int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src) {
     int rc;
 
+/*
     for (int i=0; i < count; i++) {
         rc = mem_write(addr, *src++);
         if (rc != SWD_OK) return rc;
         addr += 4;
     }
     return SWD_OK;
-
+*/
     // Auto increment isues?
     rc = ap_mem_set_csr(AP_MEM_CSW_INC);
     if (rc != SWD_OK) return rc;
@@ -675,6 +676,13 @@ int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src) {
     while(count--) {
         rc = ap_write(0, 0x0C, *src++);
         if (rc != SWD_OK) return rc;
+
+        // We need to track the address to deal with the 1k limit
+        addr += 4;
+        if ((addr & 0x3ff) == 0) {
+            rc = ap_write(0, 0x04, addr);
+            if (rc != SWD_OK) return rc;
+        }
     }
     return rc;
 }

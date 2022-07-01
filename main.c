@@ -46,6 +46,7 @@ static int usb_n_printf(int n, char *format, ...) {
     len = vfctprintf(_cdc_out, (void *)n, format, args);
     va_end(args);
     tud_cdc_n_write_flush(n);
+    tud_task();
     return len;
 }
 
@@ -645,6 +646,9 @@ void function_vflash_erase(char *packet) {
         gdb_error(1);
         return;
     }
+
+    // Start needs to be an offset, not an address... todo this isn't right
+    start &= 0x00ffffff;
     
     addr = rp2040_find_rom_func('I', 'F');  // connect_internal_flash
     if (!addr) { debug_printf("unable to lookup IF\r\n"); return; }
@@ -730,6 +734,9 @@ void function_vflash_done() {
     int rc;
 
     debug_printf("Really writing %d bytes to flash at 0x%08x\r\n", vflash_len, vflash_start);
+
+    // The address needs to be an offset not an address
+    addr &= 0x00ffffff;
 
     addr = rp2040_find_rom_func('I', 'F');  // connect_internal_flash
     if (!addr) { debug_printf("unable to lookup IF\r\n"); return; }
@@ -936,7 +943,7 @@ void gdb_init() {
 
 
     while(1) {
-        busy_wait_ms(10);
+        //busy_wait_ms(10);
         usb_poll();
 
         // Not right in here ... needs to be somewhere else.
