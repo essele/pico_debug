@@ -20,6 +20,7 @@
 static PIO                  swd_pio = pio0;
 static uint                 swd_sm;
 
+#define CHECK_OK(func)      { int rc = func; if (rc != SWD_OK) return rc; }
 
 //
 // Debug Port Register Addresses
@@ -128,7 +129,7 @@ static int swd_pio_load(PIO pio) {
 
     // Go slow for the minute...
     //pio_sm_set_clkdiv_int_frac(pio, swd_sm, 128, 0);
-    pio_sm_set_clkdiv_int_frac(pio, swd_sm, 32, 0);
+    pio_sm_set_clkdiv_int_frac(pio, swd_sm, 3, 0);
 
     // 125MHz / 2 / 3 = ~ 20Mhz --> divider of 3
     // 150Mhz / 2 / 3 = 25Mhz --> divider of 3 (and it works!)
@@ -577,138 +578,311 @@ int ap_write(int apnum, uint32_t addr, uint32_t value) {
     return rc;
 }
 
-/**
- * @brief Update the memory csr if we need to
- * 
- * @param value 
- */
-static inline int ap_mem_set_csr(uint32_t value) {
-    static uint32_t ap_mem_csr_cache = 0xffffffff;
-    int rc = SWD_OK;
 
-    if (ap_mem_csr_cache != value) {
-        ap_mem_csr_cache = value;
-        rc = ap_write(0, 0x00, value);
-    }
-    return rc;
-}
 
-// DBGSWENABLE, AHB_MASTER_DEBUG, HPROT1, no-auto-inc, 32-bit
+// DBGSWENABLE, AHB_MASTER_DEBUG, HPROT1, no-auto-inc, need to add size...
 #define AP_MEM_CSW_SINGLE     (1 << 31) \
                             | (1 << 29) \
                             | (1 << 25) \
-                            | (0 << 4)  \
-                            | (2 << 0)
+                            | (0 << 4) 
+
+#define AP_MEM_CSW_32       0b010
+#define AP_MEM_CSW_16       0b001
+#define AP_MEM_CSW_8        0b000
+
+#define AP_MEM_CSW          0x00
+#define AP_MEM_TAR          0x04
+#define AP_MEM_DRW          0x0C
 
 // DBGSWENABLE, AHB_MASTER_DEBUG, HPROT1, auto-inc, 32-bit
 #define AP_MEM_CSW_INC        (1 << 31) \
                             | (1 << 29) \
                             | (1 << 25) \
-                            | (1 << 4) \
-                            | (2 << 0)
+                            | (1 << 4)
 
-int mem_read(uint32_t addr, uint32_t *res) {
-    int rc;
-    // Control/Status word in the mem AP...
-    rc = ap_mem_set_csr(AP_MEM_CSW_SINGLE);
 
-    if (rc != SWD_OK) return rc;
+/**
+ * @brief Update the memory csw if we need to
+ * 
+ * @param value 
+ */
+static inline int ap_mem_set_csw(uint32_t value) {
+    static uint32_t ap_mem_csw_cache = 0xffffffff;
+    int rc = SWD_OK;
 
-    // Set the adress
-    rc = ap_write(0, 0x04, addr);
-    if (rc != SWD_OK) return rc;
-
-    rc = ap_read(0, 0x0c, res);
+    if (ap_mem_csw_cache != value) {
+        ap_mem_csw_cache = value;
+        rc = ap_write(0, AP_MEM_CSW, value);
+    }
     return rc;
 }
 
+
+int mem_read32(uint32_t addr, uint32_t *res) {
+    int rc;
+
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_SINGLE | AP_MEM_CSW_32));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+    return ap_read(0, AP_MEM_DRW, res);
+}
+
+int mem_read8(uint32_t addr, uint8_t *res) {
+    uint32_t v;
+    int rc;
+
+    // Actually do a 32 bit read - may save a CSW update...
+    CHECK_OK(mem_read32(addr & 0xfffffffc, &v));
+
+    *res = v >> ((addr & 3) << 3);
+    return SWD_OK;
+}
 int mem_read16(uint32_t addr, uint16_t *res) {
     uint32_t v;
     int rc;
 
-    rc = mem_read(addr & 0xfffffffc, &v);
-    if (rc != SWD_OK) return rc;
+    // Actually do a 32 bit read - may save a CSW update...
+    CHECK_OK(mem_read32(addr & 0xfffffffc, &v));
 
-    if (addr & 2) {
-        // This will be the high bits?
-        *res = (v >> 16);
-    } else {
-        *res = (v & 0xffff);
-    }
+    *res = (addr & 2) ? (v >> 16) : (v & 0xffff);
     return SWD_OK;
 }
 
-
-int mem_write(uint32_t addr, uint32_t value) {
+int mem_write8(uint32_t addr, uint8_t value) {
     int rc;
-    // Control/Status word in the mem AP...
-    rc = ap_mem_set_csr(AP_MEM_CSW_SINGLE);
 
-    if (rc != SWD_OK) return rc;
-
-    // Set the adress
-    rc = ap_write(0, 0x04, addr);
-    if (rc != SWD_OK) return rc;
-
-    rc = ap_write(0, 0x0c, value);
-    return rc;
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_SINGLE | AP_MEM_CSW_8));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+    return ap_write(0, AP_MEM_DRW, value << ((addr & 3) << 3));
 }
 
-int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src) {
+int mem_write16(uint32_t addr, uint16_t value) {
     int rc;
 
-/*
-    for (int i=0; i < count; i++) {
-        rc = mem_write(addr, *src++);
-        if (rc != SWD_OK) return rc;
-        addr += 4;
-    }
-    return SWD_OK;
-*/
-    // Auto increment isues?
-    rc = ap_mem_set_csr(AP_MEM_CSW_INC);
-    if (rc != SWD_OK) return rc;
+    assert((addr & 1) == 0);            // Must be 16 bit aligned
 
-    // Set the starting address
-    rc = ap_write(0, 0x04, addr);
-    if (rc != SWD_OK) return rc;
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_SINGLE | AP_MEM_CSW_16));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+    return (ap_write(0, AP_MEM_DRW, (addr & 2) ? value << 16: value));
+}
+int mem_write32(uint32_t addr, uint32_t value) {
+    int rc;
+
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_SINGLE | AP_MEM_CSW_32));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+    return ap_write(0, AP_MEM_DRW, value);
+}
+
+/**
+ * @brief Writes memory to the target it 32bit aligned chunks
+ * 
+ * Both the src and dst need to be aligned on a 32bit boundary and count
+ * needs to be a multiple of 4.
+ * 
+ * @param addr 
+ * @param count 
+ * @param src 
+ * @return int 
+ */
+static int mem_write_block_aligned(uint32_t addr, uint32_t count, uint32_t *src) {
+    int rc;
+
+    // Set auto-increment and the starting address...
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_INC | AP_MEM_CSW_32));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+
+    // We count in 32bit words...
+    count >>= 2;
 
     while(count--) {
-        rc = ap_write(0, 0x0C, *src++);
-        if (rc != SWD_OK) return rc;
+        CHECK_OK(ap_write(0, AP_MEM_DRW, *src++));
+
+        // We need to track the address to deal with the 1k wrap limit
+        addr += 4;
+        if ((addr & 0x3ff) == 0) {
+            CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+        }
+    }
+    return SWD_OK;
+}
+/**
+ * @brief Writes memory to the target when it's not aligned
+ * 
+ * The arget addr needs to be aligned on a 32bit boundary but the src
+ * doesn't.
+ * 
+ * @param addr 
+ * @param count 
+ * @param src 
+ * @return int 
+ */
+static int mem_write_block_unaligned(uint32_t addr, uint32_t count, uint8_t *src) {
+    int rc;
+    uint32_t v32;
+
+    // Set auto-increment and the starting address...
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_INC | AP_MEM_CSW_32));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+
+    // We count in 32bit words...
+    count >>= 2;
+
+    while(count--) {
+        v32 = *src++;
+        v32 |= (*src++) << 8;
+        v32 |= (*src++) << 16;
+        v32 |= (*src++) << 24;
+        CHECK_OK(ap_write(0, AP_MEM_DRW, v32));
 
         // We need to track the address to deal with the 1k limit
         addr += 4;
         if ((addr & 0x3ff) == 0) {
-            rc = ap_write(0, 0x04, addr);
-            if (rc != SWD_OK) return rc;
+            CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
         }
     }
-    return rc;
+    return SWD_OK;
+}
+
+int mem_write_block(uint32_t addr, uint32_t count, uint8_t *src) {
+    int rc;
+    uint16_t v16;
+
+    // The first phase is getting to an aligned address if we aren't...
+    if (addr & 3) {
+        if ((addr & 1) && count) {
+            CHECK_OK(mem_write8(addr++, *src++));
+            count--;
+            if (!count) return SWD_OK;
+        }
+        if ((addr & 2) && count) {
+            if (count == 1) return mem_write8(addr, *src);
+            v16 = *src++;
+            v16 |= (*src++) << 8;
+            CHECK_OK(mem_write16(addr, v16));
+            count -= 2;
+            if (!count) return SWD_OK;
+            addr += 2;
+        }
+    }
+
+    // At this point we have an aligned addr, see if we can optimise...
+    if (count >= 4) {
+        if (((uint32_t)src & 3) == 0) {
+            CHECK_OK(mem_write_block_aligned(addr, (count & ~3), (uint32_t *)src));
+        } else {
+            CHECK_OK(mem_write_block_unaligned(addr, (count & ~3), src));
+        }
+        count = count & 3;
+        if (!count) return SWD_OK;
+    }
+
+    // If we get here then we have some stragglers to deal with...
+    if (count & 2) {
+        v16 = *src++;
+        v16 |= (*src++) << 8;
+        CHECK_OK(mem_write16(addr, v16));
+        count -= 2;
+        if (!count) return SWD_OK;
+        addr += 2;
+    }
+    // Must be one byte left to do...
+    return mem_write8(addr, *src);
 }
 
 
 
-int mem_read_block(uint32_t addr, uint32_t count, uint32_t *dest) {
+int mem_read_block_unaligned(uint32_t addr, uint32_t count, uint8_t *dest) {
+    int rc;
+    uint32_t v32;
+    
+    // We count in 32bit words...
+    count >>= 2;
+
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_INC | AP_MEM_CSW_32));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+
+    CHECK_OK(ap_read_defer(0, AP_MEM_DRW, &v32));
+    while (--count) {
+        addr += 4;
+        if ((addr & 0x3ff) == 0) CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+
+        CHECK_OK(ap_read_defer(0, AP_MEM_DRW, &v32));
+        *dest++ = (v32 & 0xff);
+        *dest++ = (v32 & 0xff00) >> 8;
+        *dest++ = (v32 & 0xff0000) >> 16;
+        *dest++ = v32 >> 24;
+    }
+    CHECK_OK(ap_read_last(&v32));
+        *dest++ = (v32 & 0xff);
+        *dest++ = (v32 & 0xff00) >> 8;
+        *dest++ = (v32 & 0xff0000) >> 16;
+        *dest++ = v32 >> 24;
+}
+
+int mem_read_block_aligned(uint32_t addr, uint32_t count, uint32_t *dest) {
     int rc;
 
-    rc = ap_mem_set_csr(AP_MEM_CSW_INC);
-    if (rc != SWD_OK) return rc;
+    // We count in 32bit words...
+    count >>= 2;
 
-    // Set the starting address
-    rc = ap_write(0, 0x04, addr);
-    if (rc != SWD_OK) return rc;
+    CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_INC | AP_MEM_CSW_32));
+    CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
 
-    // Loop round the reads, using the deferred model.. so ignore the first one
-    rc = ap_read_defer(0, 0x0C, dest);
-    if (rc != SWD_OK) return rc;
+    CHECK_OK(ap_read_defer(0, AP_MEM_DRW, dest));
     while (--count) {
-        rc = ap_read_defer(0, 0x0C, dest++);
-        if (rc != SWD_OK) return rc;
+        addr += 4;
+        if ((addr & 0x3ff) == 0) CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
+
+        CHECK_OK(ap_read_defer(0, AP_MEM_DRW, dest++));
     }
-    // Now read the last one...
-    rc = ap_read_last(dest);
-    return rc;
+    return ap_read_last(dest);
+}
+
+
+int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
+    int rc;
+    uint16_t v16;
+
+    // The first phase is getting to an aligned address if we aren't...
+    if (addr & 3) {
+        if ((addr & 1) && count) {
+            CHECK_OK(mem_read8(addr++, dest++));
+            count--;
+            if (!count) return SWD_OK;
+        }
+        if ((addr & 2) && count) {
+            if (count == 1) return mem_read8(addr, dest);
+            CHECK_OK(mem_read16(addr, &v16));
+            *dest++ = v16 & 0xff;
+            *dest++ = (v16 & 0xff00) >> 8;
+            count -= 2;
+            if (!count) return SWD_OK;
+            addr += 2;
+        }
+    }
+
+    // At this point we have an aligned addr, see if we can optimise...
+    if (count >= 4) {
+        if (((uint32_t)dest & 3) == 0) {
+            CHECK_OK(mem_read_block_aligned(addr, (count & 0xfffffffc), (uint32_t *)dest));
+        } else {
+            CHECK_OK(mem_read_block_unaligned(addr, (count & 0xfffffffc), dest));
+        }
+        dest += count & 0xfffffffc;
+        count = count & 3;
+        if (!count) return SWD_OK;
+    }
+
+    // If we get here then we have some stragglers to deal with...
+    if (count & 2) {
+        CHECK_OK(mem_read16(addr, &v16));
+        *dest++ = v16 & 0xff;
+        *dest++ = (v16 & 0xff00) >> 8;
+        count -= 2;
+        if (!count) return SWD_OK;
+        addr += 2;
+    }
+    // Must be one byte left to do...
+    return mem_read8(addr, dest);
 }
 
 
@@ -757,33 +931,33 @@ int reg_read(int reg, uint32_t *res) {
     int rc;
     uint32_t value;
 
-    rc = mem_write(DCB_DCRSR, (0 << 16) | (reg & 0x1f));
+    rc = mem_write32(DCB_DCRSR, (0 << 16) | (reg & 0x1f));
     if (rc != SWD_OK) return rc;
 
     // We are supposed to wait for the reg ready flag ... but it seems we don't
     // need it?
     while (1) {
-        rc = mem_read(DCB_DHCSR, &value);
+        rc = mem_read32(DCB_DHCSR, &value);
         if (rc != SWD_OK) return rc;
         if (value & 0x00010000) break;
     }
-    rc = mem_read(DCB_DCRDR, res);
+    rc = mem_read32(DCB_DCRDR, res);
     return rc;
 }
 int reg_write(int reg, uint32_t value) {
     int rc;
 
     // Write the data into the RDR
-    rc = mem_write(DCB_DCRDR, value);
+    rc = mem_write32(DCB_DCRDR, value);
     if (rc != SWD_OK) return rc;
 
     // Now write the reg number
-    rc = mem_write(DCB_DCRSR, (1 << 16) | (reg & 0x1f));
+    rc = mem_write32(DCB_DCRSR, (1 << 16) | (reg & 0x1f));
     if (rc != SWD_OK) return rc;
 
     // Now wait until it's done
     while (1) {
-        rc = mem_read(DCB_DHCSR, &value);
+        rc = mem_read32(DCB_DHCSR, &value);
         if (rc != SWD_OK) return rc;
         if (value & 0x00010000) break;
     }
@@ -791,18 +965,18 @@ int reg_write(int reg, uint32_t value) {
 }
 
 int core_enable_debug() {
-    return mem_write(DCB_DHCSR, (0xA05F << 16) | 1);
+    return mem_write32(DCB_DHCSR, (0xA05F << 16) | 1);
 }
 
 int core_halt() {
     int rc;
     uint32_t value;
 
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<1) | 1);
-//    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
+    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<1) | 1);
+//    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
     if (rc != SWD_OK) return rc;
     while (1) {
-        rc = mem_read(DCB_DHCSR, &value);
+        rc = mem_read32(DCB_DHCSR, &value);
         if (rc != SWD_OK) return rc;
         if (value & 0x00020000) break;
     }
@@ -812,8 +986,8 @@ int core_halt() {
 int core_unhalt() {
     int rc;
 
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
-//    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
+    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
+//    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
     return SWD_OK;
     // TODO: more?
@@ -822,23 +996,28 @@ int core_unhalt() {
 int core_unhalt_with_masked_ints() {
     int rc;
 
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
+    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
     return SWD_OK;
 }
+
 
 int core_step() {
     int rc;
     uint32_t value;
 
+    // For both step and unhalt we need to see if there's a breakpoint at our
+    // current location, if there is then we'll need to disable it, step, and
+    // then re-enable it, otherwise we'll just keep breaking on it.
+
     // step and !halt...
-    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<2) | (0<<1) | 1);
-//    rc = mem_write(DCB_DHCSR, (0xA05F << 16) | (1<<2) | (0<<1) | 1);
+    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<2) | (0<<1) | 1);
+//    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<2) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
 
     // Now wait for a halt again...
     while (1) {
-        rc = mem_read(DCB_DHCSR, &value);
+        rc = mem_read32(DCB_DHCSR, &value);
         if (rc != SWD_OK) return rc;
         if (value & 0x00020000) break;
     }
@@ -849,7 +1028,7 @@ int core_is_halted() {
     int rc;
     uint32_t value;
 
-    rc = mem_read(DCB_DHCSR, &value);
+    rc = mem_read32(DCB_DHCSR, &value);
 
     if (rc != SWD_OK) {
         panic("HERE");
@@ -872,28 +1051,28 @@ int core_reset_halt() {
     core_halt();
 
     // Now set the DWTENA and VC_CORERESET bits...
-    rc = mem_write(DCB_DEMCR, (1<<24) | (1 << 0));
+    rc = mem_write32(DCB_DEMCR, (1<<24) | (1 << 0));
     if (rc != SWD_OK) return rc;
 
     // Now reset the core (will be caught by the above)
-    rc = mem_write(NVIC_AIRCR, (0x05FA << 16) | (1 << 2));
+    rc = mem_write32(NVIC_AIRCR, (0x05FA << 16) | (1 << 2));
 
     // Now make sure we get a reset flag....
     while (1) {
-        rc = mem_read(DCB_DHCSR, &value);
+        rc = mem_read32(DCB_DHCSR, &value);
         if (rc != SWD_OK) return rc;
         if (value & (1<<25)) break;
     }
 
     // Then make sure it clears...
     while (1) {
-        rc = mem_read(DCB_DHCSR, &value);
+        rc = mem_read32(DCB_DHCSR, &value);
         if (rc != SWD_OK) return rc;
         if (!(value & (1<<25))) break;
     }
 
     // Now clear the CORERESET bit...
-    rc = mem_write(DCB_DEMCR, (1<<24) | (0 << 0));
+    rc = mem_write32(DCB_DEMCR, (1<<24) | (0 << 0));
     return rc;
 }
 
@@ -917,11 +1096,11 @@ int bp_set(uint32_t addr) {
 
     // Set the breakpoint...
     breakpoints[bp] = addr;
-    rc = mem_write(bp_reg[bp], 0xC0000000 | (addr & 0xfffffffc) | (1));
+    rc = mem_write32(bp_reg[bp], 0xC0000000 | (addr & 0xfffffffc) | (1));
     if (rc != SWD_OK) return rc;
 
     // Turn on the breakpoint system...
-    rc = mem_write(BPCR, (1<<1) | 1);
+    rc = mem_write32(BPCR, (1<<1) | 1);
     return rc;
 }
 
@@ -931,7 +1110,7 @@ int bp_clr(uint32_t addr) {
     int bp = bp_find(addr);
     if (bp == -1) return SWD_OK;        // we don't have it? Error?
     breakpoints[bp] = 0xffffffff;
-    rc = mem_write(bp_reg[bp], 0);      // fully disabled
+    rc = mem_write32(bp_reg[bp], 0);      // fully disabled
     return rc;
 }
 
@@ -949,7 +1128,7 @@ uint32_t rp2040_find_rom_func(char ch1, char ch2) {
     uint32_t magic;
     int rc;
 
-    rc = mem_read(BOOTROM_MAGIC_ADDR, &magic);
+    rc = mem_read32(BOOTROM_MAGIC_ADDR, &magic);
     if (rc != SWD_OK) return 0;
     if ((magic & 0xffffff) != BOOTROM_MAGIC) return 0;
 
@@ -1064,7 +1243,7 @@ int swd_test() {
     int length = (__stop_mysec - __start_mysec);
     int rc;
 
-    rc = mem_write_block(0x20001000, length, (uint32_t *)__start_mysec);
+    rc = mem_write_block(0x20001000, length, __start_mysec);
     if (rc != SWD_OK) panic("fail");
 
     uint32_t args[1] = { 0x00100020 };
@@ -1075,82 +1254,3 @@ int swd_test() {
 }
 
 
-int Xswd_test() {
-    while (1) {
-        sleep_ms(200);
-
-        core_enable_debug();
-        core_halt();
-
-        // Try to read r0
-
-        int i;
-        int rc;
-
-        rc = reg_read(0b01111, &id);        // debug return address
-        rc = reg_read(0b10001, &id);        // main stack pointer
-        rc = reg_read(0b10010, &id);        // process stack pointer
-        rc = reg_read(0b10000, &id);        // xPSR
-        rc = reg_read(0, &id);
-        rc = reg_read(1, &id);
-        rc = reg_read(2, &id);
-
-
-        rc = mem_write(DCB_DCRSR, (0 << 16) | (0));
-        if (rc != SWD_OK) panic("fail");
-       for (i=0; i < 10; i++) {
-            uint32_t v;
-
-            rc = mem_read(DCB_DHCSR, &v);
-            if (rc != SWD_OK) panic("fail");
-            if (v & 0x00010000) break;
-        }
-        id = i;
-        rc = mem_read(DCB_DCRDR, &id);
-        if (rc != SWD_OK) panic("fail");
-
-
-
-        rc = ap_read(0, 0xFC, &id);
-     //   continue;
-
-        rc = mem_read_block(0x00000000, 50, buffer);
-
-        //rc = mem_read(0xd0000000, &id);
-        rc = mem_read(0xe000ed00, &id);
-
-        rc = mem_read(0x00000000, &id);
-        rc = mem_read(0x10000000, &id);
-        // CHeck sticky
-        rc = swd_read(0, 0x4, &id);
-
-                // Now see if it's in the read buf
-        rc = swd_read(0, 0xc, &id);
-
-
-        // This should be a SELECT of AP ID 0, at bank F0
-        rc = swd_write(0, 0x8, (0x00 << 24) | (0xf << 4));
-
-
-        // This should read the ID
-        rc = swd_read(1, 0xc, &id);
-
-        // CHeck sticky
-        rc = swd_read(0, 0x4, &id);
-
-
-        // Now see if it's in the read buf
-        rc = swd_read(0, 0xc, &id);
-
-        rc = swd_read(0, 0x4, &id);
-
-        // Now try reading the ID
-//        rc = swd_read(1, 0xc, &id);
-
-        xx = id;
-    }
-
-
-    while(1);
-
-}

@@ -32,5 +32,6 @@
         "conn.h": "c",
         "ssi.h": "c"
     },
-    "cortex-debug.variableUseNaturalFormat": false
+    "cortex-debug.variableUseNaturalFormat": false,
+    "cortex-debug.registerUseNaturalFormat": false
 }

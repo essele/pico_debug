@@ -23,10 +23,15 @@ int swd_init();
 int dp_init();
 int swd_test();
 
-int mem_read_block(uint32_t addr, uint32_t count, uint32_t *dest);
-int mem_read(uint32_t addr, uint32_t *res);
-int mem_write(uint32_t addr, uint32_t value);
-int mem_write_block(uint32_t addr, uint32_t count, uint32_t *src);
+int mem_read8(uint32_t addr, uint8_t *res);
+int mem_read16(uint32_t addr, uint16_t *res);
+int mem_read32(uint32_t addr, uint32_t *res);
+int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest);
+
+int mem_write8(uint32_t addr, uint8_t value);
+int mem_write16(uint32_t addr, uint16_t value);
+int mem_write32(uint32_t addr, uint32_t value);
+int mem_write_block(uint32_t addr, uint32_t count, uint8_t *src);
 
 int core_enable_debug();
 int core_halt();

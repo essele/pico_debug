@@ -18,6 +18,8 @@ add_executable(pico-debug
     id_usb.c
     tusb_config.h
 
+    flash.c flash.h
+    
     circ.h
 
     filedata.c filedata.h
