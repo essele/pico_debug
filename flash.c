@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include "pico/stdlib.h"
 
+#include "adi.h"
+
 #define FOR_TARGET          __attribute__((noinline, section("for_target")))
 #define DATA_BUFFER         0x20000000
 #define CODE_START          0x20010000

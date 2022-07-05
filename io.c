@@ -58,7 +58,7 @@ int io_get_byte() {
     return circ_get_byte(xfer);
 }
 
-int io_poll() {
+void io_poll() {
     tud_task();
     refill_from_usb();
 }

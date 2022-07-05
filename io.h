@@ -9,7 +9,7 @@
 #define IO_CONNECT          -2
 #define IO_DISCONNECT       -3
 
-int io_poll();
+void io_poll();
 int io_get_byte();
 
 #endif

@@ -688,8 +688,6 @@ void function_XX()
 void function_vflash_erase(char *packet)
 {
     uint32_t start, length;
-    uint32_t addr;
-    int rc;
     char *p = get_two_hex_numbers(packet, ',', &start, &length);
 
     if (!p || !length)
@@ -699,84 +697,13 @@ void function_vflash_erase(char *packet)
     }
     send_packet("OK", 2);
     return;
-
-    // Start needs to be an offset, not an address... todo this isn't right
-    start &= 0x00ffffff;
-
-    addr = rp2040_find_rom_func('I', 'F'); // connect_internal_flash
-    if (!addr)
-    {
-        debug_printf("unable to lookup IF\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute IF failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('E', 'X'); // exit XIP
-    if (!addr)
-    {
-        debug_printf("unable to lookup EX\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute EX failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('R', 'E'); // range erage (addr, count, blksize, blkcommand)
-    if (!addr)
-    {
-        debug_printf("unable to lookup RE\r\n");
-        return;
-    }
-    uint32_t args[4] = {start, length, (1 << 16), 0xd8};
-    rc = rp2040_call_function(addr, args, 4);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute RE failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('F', 'C'); // flush cache
-    if (!addr)
-    {
-        debug_printf("unable to lookup FC\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute FC failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('C', 'X'); // enter_cmd_xip
-    if (!addr)
-    {
-        debug_printf("unable to lookup CX\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute CX failed\r\b");
-        return;
-    }
-
-    send_packet("OK", 2);
 }
 
 // The write process will just write the data to the memory as a bit of a hack...
 // the done will actually process it...
-uint32_t vflash_ram = 0x20000000;
-uint32_t vflash_start = 0x10000000;
-uint32_t vflash_len = 0;
+uint32_t Xvflash_ram = 0x20000000;
+uint32_t Xvflash_start = 0x10000000;
+uint32_t Xvflash_len = 0;
 
 void function_vflash_write(char *packet, int len)
 {
@@ -814,110 +741,11 @@ void function_vflash_write(char *packet, int len)
 
 void function_vflash_done()
 {
-    uint32_t addr;
-    int rc;
-
     // Flush anything left...
     rp2040_add_flash_bit(0xffffffff, NULL, 0);
 
     send_packet("OK", 2);
     return;
-
-
-
-    debug_printf("Really writing %d bytes to flash at 0x%08x\r\n", vflash_len, vflash_start);
-
-    // The address needs to be an offset not an address
-    addr &= 0x00ffffff;
-
-    addr = rp2040_find_rom_func('I', 'F'); // connect_internal_flash
-    if (!addr)
-    {
-        debug_printf("unable to lookup IF\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute IF failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('E', 'X'); // exit XIP
-    if (!addr)
-    {
-        debug_printf("unable to lookup EX\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute EX failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('R', 'P'); // range program (addr, src, count)
-    if (!addr)
-    {
-        debug_printf("unable to lookup RP\r\n");
-        return;
-    }
-    uint32_t args[3] = {vflash_start, vflash_ram, vflash_len};
-
-    uint32_t tstart = time_us_32();
-
-    rc = rp2040_call_function(addr, args, 3);
-
-    uint32_t tend = time_us_32();
-    debug_printf("Flash Time: start=%d end=%d delta=%d\r\n", tstart, tend, tend - tstart);
-
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute RP failed\r\b");
-        return;
-    }
-    vflash_len = 0;
-
-    addr = rp2040_find_rom_func('F', 'C'); // flush cache
-    if (!addr)
-    {
-        debug_printf("unable to lookup FC\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute FC failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('F', 'C'); // flush cache
-    if (!addr)
-    {
-        debug_printf("unable to lookup FC\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute FC failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('C', 'X'); // enter_cmd_xip
-    if (!addr)
-    {
-        debug_printf("unable to lookup CX\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute CX failed\r\b");
-        return;
-    }
-
-    send_packet("OK", 2);
 }
 
 void function_add_breakpoint(char *packet)
