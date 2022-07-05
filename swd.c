@@ -11,6 +11,10 @@
 
 #include "swd.h"
 
+extern int usb_n_printf(int n, char *format, ...);
+#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
+
+
 #define SWDCLK              26
 #define SWDIO               22
 
@@ -365,7 +369,24 @@ struct reg {
     uint32_t value;
 };
 
+enum {
+    STATE_UNKNOWN,
+    STATE_RUNNING,
+    STATE_HALTED,
+};
+
+enum {
+    REASON_UNKNOWN,
+    REASON_DEBUG,
+    REASON_BREAKPOINT,
+    REASON_STEP,
+    REASON_RESET,
+};
+
 struct core {
+    int         state;
+    int         reason;
+
     uint32_t    dp_select_cache;
     uint32_t    ap_mem_csw_cache;
 
@@ -470,11 +491,15 @@ static const uint32_t act_seq[] = { 0x1a };
 int core_select(int num) {
     uint32_t dpidr;
     uint32_t dlpidr;
-    uint32_t targetid = num == 0 ? 0x01002927 : 0x11002927;
+    uint32_t targetid;
+    
+    // See if we are already selected...
+    if (core == &cores[num]) return SWD_OK;
+    
+    targetid = num == 0 ? 0x01002927 : 0x11002927;
 
     swd_send_bits((uint32_t *)reset_seq, 52);
     swd_targetsel(targetid);
-//    swd_send_bits((uint32_t *)zero_seq, 20);
 
     // Now read the DPIDR register... this must be next (so swd_read)
     CHECK_OK(swd_read(0, DP_DPIDR, &dpidr));
@@ -506,6 +531,8 @@ int dp_initialise() {
     int rc;
 
     for (int i=0; i < 2; i++) {
+        cores[i].state = STATE_UNKNOWN;
+        cores[i].reason = REASON_UNKNOWN;
         cores[i].dp_select_cache = 0xffffffff;
         cores[i].ap_mem_csw_cache = 0xffffffff;
         for (int j=0; j < 4; j++) {
@@ -515,7 +542,7 @@ int dp_initialise() {
             cores[i].reg_cache[j].valid = 0;
         }
     }
-    core = &cores[0];
+    core = NULL;
 
 //    swd_send_bits(reset_seq, 64);   // includes zeros
     swd_send_bits((uint32_t *)ones_seq, 8);
@@ -1138,6 +1165,7 @@ int core_unhalt() {
 //    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
+    core->state = STATE_RUNNING;
     return SWD_OK;
     // TODO: more?
 }
@@ -1149,43 +1177,49 @@ int core_unhalt_with_masked_ints() {
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
+    core->state = STATE_RUNNING;
     return SWD_OK;
 }
 
 
 int core_step() {
     int rc;
+
+    // step and !halt...
+    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<2) | (0<<1) | 1);
+    if (rc != SWD_OK) return rc;
+
+    reg_flush_cache();
+
+    core->state = STATE_RUNNING;
+    return SWD_OK;
+}
+
+int core_step_avoiding_breakpoint() {
+        int rc;
     uint32_t pc;
     uint32_t value;
     int      had_breakpoint = 0;
 
-
-    // For both step and unhalt we need to see if there's a breakpoint at our
-    // current location, if there is then we'll need to disable it, step, and
-    // then re-enable it, otherwise we'll just keep breaking on it.
     CHECK_OK(reg_read(REG_PC,&pc));
     if (bp_is_set(pc)) {
         bp_clr(pc);
         had_breakpoint = 1;
     }
 
-    // step and !halt...
-    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<2) | (0<<1) | 1);
-    if (rc != SWD_OK) return rc;
+    CHECK_OK(core_step());
 
     // Now wait for a halt again...
-    while (1) {
-        rc = mem_read32(DCB_DHCSR, &value);
-        if (rc != SWD_OK) return rc;
-        if (value & 0x00020000) break;
-    }
+//    while (1) {
+//        rc = mem_read32(DCB_DHCSR, &value);
+//        if (rc != SWD_OK) return rc;
+//        if (value & 0x00020000) break;
+//    }
 
+    // And put the breakpoint back...
     if (had_breakpoint) {
         bp_set(pc);
     }
-
-    reg_flush_cache();
-    return SWD_OK;
 }
 
 int core_is_halted() {
@@ -1201,6 +1235,68 @@ int core_is_halted() {
     if (value & 0x00020000) return 1;
     return 0;
 }
+
+int core_update_status() {
+    uint32_t dhcsr;
+
+    CHECK_OK(mem_read32(DCB_DHCSR, &dhcsr));
+
+    // Are we halted or running...
+    if (dhcsr & (1<<17)) {
+        core->state = STATE_HALTED;
+    } else {
+        core->state = STATE_RUNNING;
+    }
+
+    // Do we know why?
+    if (dhcsr & (1<<25)) {
+        core->reason = REASON_RESET;
+    }
+}
+
+// If one core stops we need to stop the other one....
+// we return the one that stopped (or -1 if neither did)
+int check_cores() {
+    int cur = core_get();
+    int other = 1-cur;
+    int old_state = core->state;
+    int to_halt = -1;
+    int rc = -1;
+
+    // The first phase is just gathering some info...
+    core_update_status();
+    if ((core->state == STATE_HALTED) && core->state != old_state) {
+        // We must have stopped... so we should stop the other one
+        to_halt = other;
+        rc = cur;
+    }
+    core_select(other);
+    old_state = core->state;
+    core_update_status();
+    if ((core->state == STATE_HALTED) && core->state != old_state) {
+        to_halt = cur;
+        rc = other;
+    }
+
+    // At this point we have other selected, so we can halt it if needed...
+    if (to_halt == other) {
+        if (core->state != STATE_HALTED) {
+            debug_printf("Halting core: %d\r\n", other);
+            core_halt();
+        }
+    }
+
+    // Go back to the orginal one and see if we needed to stop that...
+    core_select(cur);
+    if (to_halt == cur) {
+        if (core->state != STATE_HALTED) {
+            debug_printf("Halting core: %d\r\n", cur);
+            core_halt();
+        }
+    }
+    return rc;
+}
+
 
 /**
  * @brief Reset the core but stop it from executing any instructions
@@ -1333,8 +1429,8 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
     if (!rc) panic("core not halted");
 
     // Now can we continue and just wait for a halt?
-    core_unhalt();
-//    core_unhalt_with_masked_ints();
+//    core_unhalt();
+    core_unhalt_with_masked_ints();
     while(1) {
         busy_wait_ms(2);
         rc = core_is_halted();

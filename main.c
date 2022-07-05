@@ -566,9 +566,20 @@ void function_memwrite(char *packet)
     send_packet("OK", 2);
 }
 
+void send_stop_packet(int thread, int reason) {
+    char buf[16];
+
+    sprintf(buf, "T%02dthread:%d;", reason, thread);
+    send_packet(buf, strlen(buf));
+}
+
 void function_vcont(char *packet)
 {
     int rc;
+    enum { CORE_STEP=0, CORE_RUN };
+    int cur = core_get();
+    int other = 1 - cur;
+    int action[2];
 
     if (*packet == '?')
     {
@@ -576,24 +587,43 @@ void function_vcont(char *packet)
         send_packet((char *)vcont, sizeof(vcont) - 1);
         return;
     }
-    if (*packet == ';')
-        packet++;
-    if (*packet == 'c')
-    {
-        // Continue
-        debug_printf("unhalting core\r\n");
-        rc = core_unhalt();
-        debug_printf("rc=%d\r\n", rc);
-        // No reply ... but we need to check regularly now!
-        gdb_check_for_halt = 1;
+    if (strncmp(packet, ";s:1;c", 6) == 0) {
+        action[0] = CORE_STEP;
+        action[1] = CORE_RUN;
+    } else if (strncmp(packet, "s:2;c", 6) == 0) {
+        action[0] = CORE_RUN;
+        action[1] = CORE_STEP;
+    } else if (strncmp(packet, ";c", 2) == 0) {
+        action[0] = CORE_RUN;
+        action[1] = CORE_RUN;
+    } else {
+        debug_printf("UNRECOGNISED vCONT: %s\r\n", packet);
+        return;
     }
-    else if (*packet == 's')
-    {
-        // Step
+
+    // Something will be running...
+    gdb_check_for_halt = 1;
+
+    // Current core...
+    if (action[cur] == CORE_STEP) {
+        debug_printf("stepping core %d\r\n", cur);
         core_step();
-        // Assume we stop again...
-        send_packet("S05", 3);
+        //send_stop_packet(cur+1, 5);
+    } else {
+        debug_printf("unhalting core %d\r\n", cur);
+        core_unhalt();
     }
+    // Other core...
+    core_select(other);
+    if (action[other] == CORE_STEP) {
+        debug_printf("stepping core %d\r\n", other);
+        core_step();
+        //send_stop_packet(other+1, 5);
+    } else {
+        debug_printf("unhalting core %d\r\n", other);
+        core_unhalt();
+    }
+    core_select(cur);
 }
 
 static char hex_digits[] = "0123456789abcdef";
@@ -1233,11 +1263,11 @@ int main() {
         // Not right in here ... needs to be somewhere else.
         if (gdb_check_for_halt)
         {
-            if (core_is_halted())
-            {
-                debug_printf("CORE HAS HALTED\r\n");
+            int rc = check_cores();
+            if (rc != -1) {
+                debug_printf("CORE %d has halted\r\n");
+                send_stop_packet(rc+1, 5);
                 gdb_check_for_halt = 0;
-                send_packet("S05", 3);
             }
         }
     }

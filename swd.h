@@ -39,8 +39,10 @@ int core_enable_debug();
 int core_halt();
 int core_unhalt();
 int core_step();
+int core_step_avoiding_breakpoint();
 int core_is_halted();
 int core_reset_halt();
+int check_cores();
 
 uint32_t rp2040_find_rom_func(char ch1, char ch2);
 int rp2040_call_function(uint32_t addr, uint32_t args[], int argc);
