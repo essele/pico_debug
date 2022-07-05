@@ -9,13 +9,12 @@ This is very much work-in-progress and will develop over time, currently working
 - Clockable up to 25Mhz (over 6" jumper leads!)
 - Very very basic GDB server (over USB CDC) to eliminate need for OpenOCD
 - Orders of magnitude better performance
+- Delta based flashing (only program if the different)
 - NOWHERE NEAR COMPLETE OR PROPERLY TESTED
 
 Still to do:
 
 - Second core support
-- Proper flashing approach (currently limited to 64K)
-- Flash only needed sectors
 - Proper handling of maskints for halt/step/continue
 - LOTS 
 
@@ -51,7 +50,9 @@ All of these issues compound and you get overall poor debug performance and slow
 
 **3. Removing the need for OpenOCD** ... this solution embeds a small GDB server and delivers access over a USB CDC (serial) interface. This way the master GDB instance is communicating directly with the probe and not going through an intermediary. This also signficiantly reduces the amount of data transferred over USB further improving speed.
 
-With all of the above you get much quicker flashing times and a much more (almost instant) debug experience when stepping through code. My current flashing code is limited to 64K (just to get it working) so I can't do a real world comparison on my 200K example, but I'm estimating it's at least 5 times faster.
+**4. Delta based flashing** ... when flashing a device I copy the code over as the requests come in, once it gets to 64K then it runs a comparison if there are only minor differences (up to two 4k pages) then only they are flashed, anything more and the whole 64K chunk is done. This results is signficantly improved flashing times, and no flashing if the code is the same!
+
+With all of the above you get much quicker flashing times and a much more (almost instant) debug experience when stepping through code. I haven't done proper timed comparisons yet, but the 10s flashing time mentioned above seems to come down to 3s -- a large part of which is the 64K block erase time. 
 
 
 Note: prior to starting work on this I had zero knowledge of SWD, zero knowledge of the internals of ARM debugging, and very little understanding of GDB, so this has been a huge learning curve and there will be a myriad of mistakes that need fixing!
