@@ -7,11 +7,17 @@
 
 #include "pico/printf.h"
 
+#include "lerp/task.h"
+#include "lerp/circ.h"
+
 #include "swd.h"
+#include "adi.h"
 #include "flash.h"
 
 #include "tusb.h"
 #include "filedata.h"
+
+#include "io.h"
 
 volatile int ret;
 
@@ -88,7 +94,6 @@ int hex_byte(char *packet)
 uint32_t hex_word_le32(char *packet)
 {
     uint32_t rc = 0;
-    int v;
 
     for (int i = 0; i < 4; i++)
     {
@@ -105,7 +110,6 @@ uint32_t hex_word_le32(char *packet)
 uint32_t hex_word_be32(char *packet)
 {
     uint32_t rc = 0;
-    int v;
     for (int i = 0; i < 8; i++)
     {
         rc <<= 4;
@@ -117,40 +121,6 @@ uint32_t hex_word_be32(char *packet)
     return rc;
 }
 
-/**
- * Input mechanism -- needs to support both USB and Ethernet, and unfortunately
- * one of those works as a pull and one as a push.
- *
- * So... use a circular buffer for input which we refill from usb and the ethernet
- * stack fills as packets come in.
- *
- */
-
-#include "circ.h"
-#define XFER_CIRC_SIZE 2048
-CIRC_DEFINE(xfer, XFER_CIRC_SIZE);
-
-static int refill_from_usb()
-{
-    int count = 0;
-
-    if (!tud_cdc_connected())
-        return 0;
-
-    // If we go around the end we'll need to call this twice...
-    int space = circ_space_before_wrap(xfer);
-    if (space)
-    {
-        int avail = tud_cdc_available();
-        if (avail)
-        {
-            int size = MIN(space, avail);
-            count = tud_cdc_read(xfer->head, size);
-            circ_advance_head(xfer, count);
-        }
-    }
-    return count;
-}
 
 // State variables and return variables for build_packet
 enum
@@ -195,81 +165,80 @@ static int build_packet()
     static int supplied_sum;
     int digit;
 
-    while ((ch = circ_get_byte(xfer)) != -1)
-    {
-        switch (state)
-        {
-        case BP_INIT:
-            gdb_bp = gdb_buffer;
-            gdb_blen = 0;
-            checksum = 0;
-            // fall through...
+//    while ((ch = circ_get_byte(xfer)) != -1) {
+    while ((ch = io_get_byte()) >= 0) {
+        switch (state) {
+            case BP_INIT:
+                gdb_bp = gdb_buffer;
+                gdb_blen = 0;
+                checksum = 0;
+                // fall through...
 
-        case BP_START:
-            if (ch == '+')
-                return BP_ACK;
-            if (ch == '-')
-                return BP_NACK;
-            if (ch == '$')
-            {
+            case BP_START:
+                if (ch == '+')
+                    return BP_ACK;
+                if (ch == '-')
+                    return BP_NACK;
+                if (ch == '$')
+                {
+                    state = BP_DATA;
+                    break;
+                }
+                if (ch == 0x3)
+                    return BP_INTR;
+                debug_printf("ch=%d\r\n", ch);
+                return BP_GARBAGE;
+
+            case BP_DATA:
+                if (ch == '#')
+                {
+                    state = BP_CHK1;
+                    break;
+                }
+                checksum += ch;
+                if (ch == '}')
+                {
+                    state = BP_ESC;
+                    break;
+                }
+                *gdb_bp++ = ch;
+                gdb_blen++;
+                break;
+
+            case BP_ESC:
+                checksum += ch;
+                *gdb_bp++ = ch ^ 0x20;
+                gdb_blen++;
                 state = BP_DATA;
                 break;
-            }
-            if (ch == 0x3)
-                return BP_INTR;
-            debug_printf("ch=%d\r\n", ch);
-            return BP_GARBAGE;
 
-        case BP_DATA:
-            if (ch == '#')
-            {
-                state = BP_CHK1;
+            case BP_CHK1:
+                *gdb_bp++ = 0; // zero terminate for ease later
+                digit = hex_digit(ch);
+                if (digit == -1)
+                {
+                    state = BP_INIT;
+                    return BP_CORRUPT;
+                }
+                supplied_sum = (digit << 4);
+                state = BP_CHK2;
                 break;
-            }
-            checksum += ch;
-            if (ch == '}')
-            {
-                state = BP_ESC;
-                break;
-            }
-            *gdb_bp++ = ch;
-            gdb_blen++;
-            break;
 
-        case BP_ESC:
-            checksum += ch;
-            *gdb_bp++ = ch ^ 0x20;
-            gdb_blen++;
-            state = BP_DATA;
-            break;
-
-        case BP_CHK1:
-            *gdb_bp++ = 0; // zero terminate for ease later
-            digit = hex_digit(ch);
-            if (digit == -1)
-            {
+            case BP_CHK2:
+                digit = hex_digit(ch);
+                if (digit == -1)
+                {
+                    state = BP_INIT;
+                    return BP_CORRUPT;
+                }
+                supplied_sum |= digit;
+                if (supplied_sum != checksum)
+                {
+                    state = BP_INIT;
+                    return BP_CHKSUM_FAIL;
+                }
                 state = BP_INIT;
-                return BP_CORRUPT;
-            }
-            supplied_sum = (digit << 4);
-            state = BP_CHK2;
-            break;
-
-        case BP_CHK2:
-            digit = hex_digit(ch);
-            if (digit == -1)
-            {
-                state = BP_INIT;
-                return BP_CORRUPT;
-            }
-            supplied_sum |= digit;
-            if (supplied_sum != checksum)
-            {
-                state = BP_INIT;
-                return BP_CHKSUM_FAIL;
-            }
-            state = BP_INIT;
-            return BP_PACKET;
+                return BP_PACKET;
         }
         if (gdb_blen == GDB_BUFFER_SIZE)
         {
@@ -277,12 +246,14 @@ static int build_packet()
             return BP_OVERFLOW;
         }
     }
+    if (ch < 0) {
+        // TODO: connections etc.
+    }
     return BP_RUNNING;
 }
 
 static char gen_buffer[1024];
 
-static char debug_buf[800];
 
 enum
 {
@@ -311,6 +282,7 @@ int send_packet(char *packet, int len)
         sum += packet[i];
     debug_printf("Sending: $%.*s#%02x\r\n", len, packet, sum);
     gdb_printf("$%.*s#%02x", len, packet, sum);
+    return 0;
 }
 
 int send_packet_with_leading_char(char ch, char *packet, int len)
@@ -320,16 +292,16 @@ int send_packet_with_leading_char(char ch, char *packet, int len)
         sum += packet[i];
     debug_printf("Sending: $%c%.*s#%02x\r\n", ch, len, packet, sum);
     gdb_printf("$%c%.*s#%02x", ch, len, packet, sum);
+    return 0;
 }
 
-int gdb_error(int err)
-{
+int gdb_error(int err) {
     char errstr[4];
 
     snprintf(errstr, 4, "E%2.2X", err);
     send_packet(errstr, 3);
+    return 0;
 }
-
 
 /**
  * @brief Decode a "filename:offset:length.." construct
@@ -425,7 +397,8 @@ void function_get_sys_regs()
         rc = reg_read(i, &rval);
         if (rc != SWD_OK)
             panic("reg read failed");
-        sprintf(p, "%02x%02x%02x%02x", rval & 0xff, (rval & 0xff00) >> 8, (rval & 0xff0000) >> 16, rval >> 24);
+        sprintf(p, "%02x%02x%02x%02x", (uint8_t)(rval & 0xff), (uint8_t)((rval & 0xff00) >> 8), 
+                                                (uint8_t)((rval & 0xff0000) >> 16), (uint8_t)(rval >> 24));
         p += 8;
     }
     send_packet(buf, strlen(buf));
@@ -439,7 +412,8 @@ void function_get_reg(char *packet)
     int rc = reg_read(reg, &rval);
     if (rc != SWD_OK)
         panic("reg read failed");
-    sprintf(buf, "%02x%02x%02x%02x", rval & 0xff, (rval & 0xff00) >> 8, (rval & 0xff0000) >> 16, rval >> 24);
+    sprintf(buf, "%02x%02x%02x%02x", (uint8_t)(rval & 0xff), (uint8_t)((rval & 0xff00) >> 8), 
+                                            (uint8_t)((rval & 0xff0000) >> 16), (uint8_t)(rval >> 24));
     send_packet(buf, 8);
 }
 
@@ -485,7 +459,6 @@ void function_memread(char *packet)
     char *sep;
     uint32_t addr;
     uint32_t len;
-    int rc;
 
     addr = strtoul(packet, &sep, 16);
     if (*sep != ',')
@@ -506,7 +479,7 @@ void function_memread(char *packet)
         send_packet(NULL, 0);
         return;
     }
-    rc = mem_read_block(addr, len, buffer);
+    rc = mem_read_block(addr, len, (uint8_t *)buffer);
 
     char *out = malloc((len * 2) + 1);
     if (!out)
@@ -575,7 +548,6 @@ void send_stop_packet(int thread, int reason) {
 
 void function_vcont(char *packet)
 {
-    int rc;
     enum { CORE_STEP=0, CORE_RUN };
     int cur = core_get();
     int other = 1 - cur;
@@ -590,7 +562,7 @@ void function_vcont(char *packet)
     if (strncmp(packet, ";s:1;c", 6) == 0) {
         action[0] = CORE_STEP;
         action[1] = CORE_RUN;
-    } else if (strncmp(packet, "s:2;c", 6) == 0) {
+    } else if (strncmp(packet, ";s:2;c", 6) == 0) {
         action[0] = CORE_RUN;
         action[1] = CORE_STEP;
     } else if (strncmp(packet, ";c", 2) == 0) {
@@ -809,8 +781,6 @@ uint32_t vflash_len = 0;
 void function_vflash_write(char *packet, int len)
 {
     uint32_t start;
-    uint32_t addr;
-    int rc;
 
     char *sep;
     start = strtoul(packet, &sep, 16);
@@ -835,7 +805,7 @@ void function_vflash_write(char *packet, int len)
 
     debug_printf("writing %d bytes into memory at %08x\r\n", len, p);
 
-    rp2040_add_flash_bit(start & 0x00ffffff, p, len);
+    rp2040_add_flash_bit(start & 0x00ffffff, (uint8_t *)p, len);
     free(p);
 
     send_packet("OK", 2);
@@ -1174,8 +1144,8 @@ int usb_poll()
 {
     int rc;
 
-    tud_task();
-    refill_from_usb();
+    //tud_task();
+    //refill_from_usb();
     rc = build_packet();
     if (rc != BP_RUNNING)
     {
@@ -1209,6 +1179,7 @@ int usb_poll()
     //        int length = gdb_mkr - gdb_buffer;
     //        process_packet(gdb_buffer, length);
     //    }
+    return 0;
 }
 
 void gdb_init()
@@ -1216,6 +1187,33 @@ void gdb_init()
     gdb_bp = gdb_buffer;
     gdb_blen = 0;
 }
+
+
+
+/**
+ * @brief Main polling function called regularly by lerp_task
+ * 
+ * We need to do time sensitive things here and we mustn't block.
+ * 
+ */
+void main_poll() {
+    // make sure usb is running and we're processing data...
+    io_poll();
+
+    // make sure the PIO blocks are managed...
+    swd_pio_poll();
+}
+
+DEFINE_TASK(xtest1, 1024);
+
+void func_test(void *arg) {
+    debug_printf("HERE\r\n");
+    while(1) {
+        //task_sleep_ms(10);
+        usb_poll();
+    }
+}
+
 
 int main() {
     // Take us to 150Mhz (for future rmii support)
@@ -1243,6 +1241,11 @@ int main() {
 
     tusb_init();
     gdb_init();
+
+    CREATE_TASK(xtest1, func_test, NULL);
+
+    leos_init(main_poll);
+    leos_start();
 
     //    sleep_ms(100);
     //    if (core_reset_halt() != SWD_OK) panic("failed reset");

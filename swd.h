@@ -18,39 +18,13 @@
 #define SWD_ERROR           3
 #define SWD_PARITY          4
 
+#define CHECK_OK(func)      { int rc = func; if (rc != SWD_OK) return rc; }
 
 int swd_init();
-int dp_init();
-int swd_test();
-
-int mem_read8(uint32_t addr, uint8_t *res);
-int mem_read16(uint32_t addr, uint16_t *res);
-int mem_read32(uint32_t addr, uint32_t *res);
-int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest);
-
-int mem_write8(uint32_t addr, uint8_t value);
-int mem_write16(uint32_t addr, uint16_t value);
-int mem_write32(uint32_t addr, uint32_t value);
-int mem_write_block(uint32_t addr, uint32_t count, uint8_t *src);
-
-int core_select(int num);
-int core_get();
-int core_enable_debug();
-int core_halt();
-int core_unhalt();
-int core_step();
-int core_step_avoiding_breakpoint();
-int core_is_halted();
-int core_reset_halt();
-int check_cores();
-
-uint32_t rp2040_find_rom_func(char ch1, char ch2);
-int rp2040_call_function(uint32_t addr, uint32_t args[], int argc);
-
-int reg_read(int reg, uint32_t *res);
-int reg_write(int reg, uint32_t value);
-
-int bp_set(uint32_t addr);
-int bp_clr(uint32_t addr);
+void swd_pio_poll();
+void swd_targetsel(uint32_t target);
+int swd_read(int APnDP, int addr, uint32_t *result);
+int swd_write(int APnDP, int addr, uint32_t value);
+void swd_send_bits(uint32_t *data, int bitcount);
 
 #endif

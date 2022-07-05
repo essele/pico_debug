@@ -62,7 +62,7 @@ static int rp2040_program_flash_chunk(int offset, int length) {
     if (!flash_code_copied) {
         debug_printf("copying code\r\n");
         int code_len = (__stop_for_target - __start_for_target);
-        rc = mem_write_block(CODE_START, length, __start_for_target);
+        rc = mem_write_block(CODE_START, code_len, (uint8_t *)__start_for_target);
         if (rc != SWD_OK) panic("fail");
         flash_code_copied = 1;
     }
@@ -131,7 +131,7 @@ int rp2040_add_flash_bit(uint32_t offset, uint8_t *src, int size) {
         rc = mem_write_block(DATA_BUFFER + (offset - chunk_start), count, src);
         if (rc != SWD_OK) {
             debug_printf("COPY FAILED: %d\r\n", rc);
-            return;
+            return 1;;
         }
         debug_printf("Copied %d bytes to location 0x%08x (%d ms)\r\n", count, DATA_BUFFER+(offset-chunk_start),
                                                                             (time_us_32() - t)/1000);
@@ -231,7 +231,6 @@ FOR_TARGET int flash_block(uint32_t offset, uint8_t *src, int length) {
         dst_block += 4096;
         left -= 4096;
     }
-done_check:
     if (!change_count) return 0;        // nothing to do
 
     // turn off xip so we can do stuff...

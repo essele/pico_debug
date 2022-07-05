@@ -14,14 +14,16 @@ pico_sdk_init()
 
 add_executable(pico-debug
     main.c
+
     swd.c swd.h swd.pio
+    adi.c adi.h
+
     id_usb.c
     tusb_config.h
 
     flash.c flash.h
+    io.c io.h
     
-    circ.h
-
     filedata.c filedata.h
 
     files/rp2040_features.xml
@@ -52,6 +54,11 @@ pico_generate_pio_header(pico-debug ${CMAKE_CURRENT_LIST_DIR}/swd.pio)
 target_include_directories(pico-debug PUBLIC
         ${CMAKE_CURRENT_LIST_DIR})
 
+
+# Add all of our modules
+add_subdirectory(modules/lerp_task)
+add_subdirectory(modules/lerp_circ)
+
 target_compile_definitions(pico-debug PRIVATE
   # We don't want the default alarm pool (and the IRQ's associated!)
   PICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1
@@ -81,4 +88,7 @@ target_link_libraries(pico-debug
   tinyusb_board
   pico_unique_id
   hardware_pio
+
+  lerp_task
+  lerp_circ
 )
