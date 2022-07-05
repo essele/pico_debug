@@ -33,6 +33,8 @@ int mem_write16(uint32_t addr, uint16_t value);
 int mem_write32(uint32_t addr, uint32_t value);
 int mem_write_block(uint32_t addr, uint32_t count, uint8_t *src);
 
+int core_select(int num);
+int core_get();
 int core_enable_debug();
 int core_halt();
 int core_unhalt();

@@ -943,6 +943,56 @@ void function_remove_breakpoint(char *packet)
     send_packet("OK", 2);
 }
 
+int get_threadid(char *packet) {
+    return strtol(packet, NULL, 10);
+}
+
+void function_thread(char *packet, int packet_size) {
+    int tid;
+
+    if (*packet == 'T') {
+        // Check for thread existance...
+        packet++;
+        tid = get_threadid(packet);
+        if (tid == 1 || tid == 2) {
+            send_packet("OK", 2);
+        } else {
+            gdb_error(1);
+        }        
+    } else if (*packet == 'H') {
+        int num;
+        int rc;
+        packet++;
+
+        if (*packet == 'c') {
+            // Continue....
+            tid = get_threadid(packet+1);
+            send_packet("OK", 2);
+            return;
+        }
+        if (*packet == 'g') { 
+            tid = get_threadid(packet+1);
+            if (tid == 0 || tid == 1) {
+                num = 0;
+            } else if (tid == 2) {
+                num = 1;
+            } else {
+                gdb_error(1); 
+                return;
+            }
+            rc = core_select(num);
+            if (rc != SWD_OK) {
+                debug_printf("CORE SELECT FAILED\r\n");
+                gdb_error(1);
+            } else {
+                send_packet("OK", 2);
+            }
+            return;
+        }
+        gdb_error(1);
+    }
+}
+
 void process_packet(char *packet, int packet_size)
 {
     // TODO: checksum
@@ -1000,13 +1050,17 @@ void process_packet(char *packet, int packet_size)
     else if (strncmp(packet, "H", 1) == 0)
     {
         // This is thread stuff...
-        send_packet("OK", 2);
+        function_thread(packet, packet_size);
     }
     else if (strncmp(packet, "qC", 2) == 0)
     {
         // RTOS thread?
         //        send_packet("QC0", 3);
-        send_packet("QC0000000000000001", 18);
+        if (core_get() == 0) {
+            send_packet("QC0000000000000001", 18);
+        } else {
+            send_packet("QC0000000000000002", 18);
+        }
     }
     else if (strncmp(packet, "qOffsets", 8) == 0)
     {
@@ -1063,6 +1117,9 @@ void process_packet(char *packet, int packet_size)
     else if (strncmp(packet, "vFlashDone", 10) == 0)
     {
         function_vflash_done();
+    }
+    else if (strncmp(packet, "T", 1) == 0) {
+        function_thread(packet, packet_size);
     }
     else
     {
@@ -1130,9 +1187,7 @@ void gdb_init()
     gdb_blen = 0;
 }
 
-int main()
-
-{
+int main() {
     // Take us to 150Mhz (for future rmii support)
     set_sys_clock_khz(150 * 1000, true);
 
@@ -1141,11 +1196,20 @@ int main()
     if (dp_init() != SWD_OK)
         panic("unable to init DP");
 
-    core_enable_debug();
+    // This will be core 0...
+//    core_enable_debug();
     core_reset_halt();
-    core_unhalt();
-    sleep_ms(200);
-    core_halt();
+
+    // Now core 1...
+    core_select(1);
+//    core_enable_debug();
+    core_reset_halt();
+
+    // Back to the first one again...
+    core_select(0);
+//    core_unhalt();
+//    sleep_ms(200);
+//    core_halt();
 
     tusb_init();
     gdb_init();

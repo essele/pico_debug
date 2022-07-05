@@ -25,7 +25,7 @@ static uint                 swd_sm;
 //
 // Debug Port Register Addresses
 //
-#define DP_IDCODE                       0x00U   // IDCODE Register (RD)
+#define DP_DPIDR                        0x00U   // IDCODE Register (RD)
 #define DP_ABORT                        0x00U   // Abort Register (WR)
 #define DP_CTRL_STAT                    0x04U   // Control & Status
 #define DP_RESEND                       0x08U   // Resend (RD)
@@ -356,6 +356,28 @@ void swd_send_bits(uint32_t *data, int bitcount) {
     if (bitcount == 0) pio_sm_put_blocking(swd_pio, swd_sm, 0); 
 }
 
+// ----------------------------------------------------------------------------
+// We need a few things on a per-core basis...
+// ----------------------------------------------------------------------------
+
+struct reg {
+    int valid;
+    uint32_t value;
+};
+
+struct core {
+    uint32_t    dp_select_cache;
+    uint32_t    ap_mem_csw_cache;
+
+    uint32_t    breakpoints[4];
+    struct reg  reg_cache[24];
+};
+
+
+struct core cores[2];
+
+// Core will point at whichever one is current...
+struct core *core = &cores[0];
 
 
 // ----------------------------------------------------------------------------
@@ -367,7 +389,7 @@ void swd_send_bits(uint32_t *data, int bitcount) {
  * @brief A cached copy of whats in the DP_SELECT register so that we can
  *        be efficient about updating it.
  */
-static int dp_select_cache = 0xffffffff;
+//static int dp_select_cache = 0xffffffff;
 
 /**
  * @brief Change the dp bank in SELECT if it needs changing
@@ -380,9 +402,9 @@ static inline int dp_select_bank(int bank) {
 
     assert(bank <= 0xf);
 
-    if ((dp_select_cache & 0xf) != bank) {
-        dp_select_cache = (dp_select_cache & 0xfffffff0) | bank;
-        rc = swd_write(0, DP_SELECT, dp_select_cache);
+    if ((core->dp_select_cache & 0xf) != bank) {
+        core->dp_select_cache = (core->dp_select_cache & 0xfffffff0) | bank;
+        rc = swd_write(0, DP_SELECT, core->dp_select_cache);
     }
     return rc;
 }
@@ -401,9 +423,9 @@ static inline int ap_select_with_bank(uint ap, uint bank) {
     assert(bank <= 255);
     assert(ap <= 255);
 
-    if ((ap != (dp_select_cache >> 24)) || (bank != (dp_select_cache & 0xf0))) {
-        dp_select_cache = (ap << 24) | bank | dp_select_cache & 0xf;
-        rc = swd_write(0, DP_SELECT, dp_select_cache);
+    if ((ap != (core->dp_select_cache >> 24)) || (bank != (core->dp_select_cache & 0xf0))) {
+        core->dp_select_cache = (ap << 24) | bank | core->dp_select_cache & 0xf;
+        rc = swd_write(0, DP_SELECT, core->dp_select_cache);
     }
     return rc;
 }
@@ -413,7 +435,7 @@ int dp_read(uint32_t addr, uint32_t *res) {
 
     // First check to see if we are reading something where we might
     // care about the dp_banksel
-    if (1 && (addr & 0x0f) == 4) {
+    if ((addr & 0x0f) == 4) {
         rc = dp_select_bank((addr & 0xf0) >> 4);
         if (rc != SWD_OK) return rc;
     }
@@ -425,15 +447,15 @@ int dp_write(uint32_t addr, uint32_t value) {
 
     // First check to see if we are writing something where we might
     // care about the dp_banksel
-    if (1 && (addr & 0x0f) == 4) {
+    if ((addr & 0x0f) == 4) {
         rc = dp_select_bank((addr & 0xf0) >> 4);
         if (rc != SWD_OK) return rc;
     }
     return swd_write(0, addr & 0xf, value);
 }
 
-// Reset is at least 50 bits of 1...
-static const uint32_t reset_seq[] = { 0xffffffff, 0x00ffffff };
+// Reset is at least 50 bits of 1 followed by zero's
+static const uint32_t reset_seq[] = { 0xffffffff, 0x0003ffff };
 
 // Selection alert sequence... 128bits
 static const uint32_t selection_alert_seq[] = { 0x6209F392, 0x86852D95, 0xE3DDAFE9, 0x19BC0EA2 };
@@ -445,6 +467,35 @@ static const uint32_t ones_seq[] = { 0xffffffff };
 // Activation sequence (8 bits)
 static const uint32_t act_seq[] = { 0x1a };
 
+int core_select(int num) {
+    uint32_t dpidr;
+    uint32_t dlpidr;
+    uint32_t targetid = num == 0 ? 0x01002927 : 0x11002927;
+
+    swd_send_bits((uint32_t *)reset_seq, 52);
+    swd_targetsel(targetid);
+//    swd_send_bits((uint32_t *)zero_seq, 20);
+
+    // Now read the DPIDR register... this must be next (so swd_read)
+    CHECK_OK(swd_read(0, DP_DPIDR, &dpidr));
+
+    // Need to switch the core here for dp_read to work...
+    core = &cores[num];
+
+    // If that was ok we can validate the switch by checking the TINSTANCE part of
+    // DLPIDR
+    CHECK_OK(dp_read(DP_DLPIDR, &dlpidr));
+
+    if ((dlpidr & 0xf0000000) != (targetid & 0xf0000000)) return SWD_ERROR;
+
+
+    return SWD_OK;
+}
+
+int core_get() {
+    return (core == &cores[0]) ? 0 : 1;
+}
+
 
 /**
  * @brief Send the required sequence to reset the line and start SWD ops
@@ -453,6 +504,18 @@ static const uint32_t act_seq[] = { 0x1a };
 int dp_initialise() {
     uint32_t id;
     int rc;
+
+    for (int i=0; i < 2; i++) {
+        cores[i].dp_select_cache = 0xffffffff;
+        cores[i].ap_mem_csw_cache = 0xffffffff;
+        for (int j=0; j < 4; j++) {
+            cores[i].breakpoints[j] = 0xffffffff;
+        }
+        for (int j=0; j < sizeof(cores[i].reg_cache)/sizeof(struct reg); j++) {
+            cores[i].reg_cache[j].valid = 0;
+        }
+    }
+    core = &cores[0];
 
 //    swd_send_bits(reset_seq, 64);   // includes zeros
     swd_send_bits((uint32_t *)ones_seq, 8);
@@ -463,15 +526,17 @@ int dp_initialise() {
     swd_send_bits((uint32_t *)reset_seq, 64);   // includes zeros
 
     // Now a reset sequence
-    swd_send_bits((uint32_t *)reset_seq, 64);
+//    swd_send_bits((uint32_t *)reset_seq, 64);
 
 
-    swd_targetsel(0x01002927);
-    swd_send_bits((uint32_t *)zero_seq, 20);
+//    swd_targetsel(0x01002927);
+//    swd_send_bits((uint32_t *)zero_seq, 20);
 
     // Now read the status register... this must be next (so swd_read)
-    rc = swd_read(0, 0, &id);
-    if (rc != SWD_OK) return rc;
+//    rc = swd_read(0, 0, &id);
+//    if (rc != SWD_OK) return rc;
+
+    core_select(0);
 
     // And then try to clear any errors...
     rc = swd_write(0, DP_ABORT, ALLERRCLR);
@@ -607,11 +672,11 @@ int ap_write(int apnum, uint32_t addr, uint32_t value) {
  * @param value 
  */
 static inline int ap_mem_set_csw(uint32_t value) {
-    static uint32_t ap_mem_csw_cache = 0xffffffff;
+//    static uint32_t ap_mem_csw_cache = 0xffffffff;
     int rc = SWD_OK;
 
-    if (ap_mem_csw_cache != value) {
-        ap_mem_csw_cache = value;
+    if (core->ap_mem_csw_cache != value) {
+        core->ap_mem_csw_cache = value;
         rc = ap_write(0, AP_MEM_CSW, value);
     }
     return rc;
@@ -905,8 +970,14 @@ int swd_init() {
 }
 
 int dp_init() {
+    // Initialise and switch out of dormant mode (select target 0)
     if (dp_initialise() != SWD_OK) panic("unable to initialise dp\r\n");
-    if (dp_power_on() != SWD_OK) panic("unable to power on dp\r\n");
+    if (dp_power_on() != SWD_OK) panic("unable to power on dp (core0)\r\n");
+    if (core_enable_debug() != SWD_OK) panic("unable to enable debug on core0\r\n");
+    if (core_select(1) != SWD_OK) panic("unable to select core1\r\n");
+    if (dp_power_on() != SWD_OK) panic("unable to power on core1\r\n");
+    if (core_enable_debug() != SWD_OK) panic("unable to enable debug on core1\r\n");
+    if (core_select(0) != SWD_OK) panic("unable reselect core 0\r\n");
     return SWD_OK;
 }
 
@@ -920,6 +991,17 @@ int dp_init() {
 #define NVIC_AIRCR      0xE000ED0C
 
 
+//struct reg reg_cache[24];
+
+#define REG_PC          15  
+
+void reg_flush_cache() {
+    for (int i=0; i < sizeof(core->reg_cache)/sizeof(struct reg); i++) {
+        core->reg_cache[i].valid = 0;
+    }
+}
+
+
 /**
  * @brief Read a core register ... we already assume we are in debug state
  * 
@@ -931,6 +1013,11 @@ int reg_read(int reg, uint32_t *res) {
     int rc;
     uint32_t value;
 
+    if (0 && core->reg_cache[reg].valid) {
+        *res = core->reg_cache[reg].value;
+        return SWD_OK;
+    }
+
     rc = mem_write32(DCB_DCRSR, (0 << 16) | (reg & 0x1f));
     if (rc != SWD_OK) return rc;
 
@@ -941,11 +1028,17 @@ int reg_read(int reg, uint32_t *res) {
         if (rc != SWD_OK) return rc;
         if (value & 0x00010000) break;
     }
-    rc = mem_read32(DCB_DCRDR, res);
-    return rc;
+    CHECK_OK(mem_read32(DCB_DCRDR, &value));
+    core->reg_cache[reg].value = value;
+    core->reg_cache[reg].valid = 1;
+    *res = value;
+    return SWD_OK;
 }
 int reg_write(int reg, uint32_t value) {
     int rc;
+
+    core->reg_cache[reg].value = value;
+    core->reg_cache[reg].valid = 1;
 
     // Write the data into the RDR
     rc = mem_write32(DCB_DCRDR, value);
@@ -964,6 +1057,58 @@ int reg_write(int reg, uint32_t value) {
     return SWD_OK;
 }
 
+
+#define BPCR        0xE0002000
+//static uint32_t breakpoints[4] = { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
+static const uint32_t bp_reg[4] = { 0xE0002008, 0xE000200C, 0xE0002010, 0xE0002014 };
+
+int bp_find(uint32_t addr) {
+    for (int i=0; i < 4; i++) {
+        if (core->breakpoints[i] == addr) return i;
+    }
+    return -1;
+}
+
+int bp_set(uint32_t addr) {
+    int rc;
+    uint32_t matchword;
+    int bp = bp_find(addr);
+    if (bp != -1) return SWD_OK;        // already have it
+    bp = bp_find(0xffffffff);
+    if (bp == -1) return SWD_ERROR;     // no slots available
+
+    // Set the breakpoint...
+    core->breakpoints[bp] = addr;
+
+    matchword = (addr & 2) ? (0b10 << 30) : (0b01 << 30);
+
+    rc = mem_write32(bp_reg[bp], matchword | (addr & 0x1ffffffc) | (1));
+    if (rc != SWD_OK) return rc;
+
+    // Turn on the breakpoint system...
+    rc = mem_write32(BPCR, (1<<1) | 1);
+    return rc;
+}
+
+int bp_clr(uint32_t addr) {
+    int rc;
+
+    int bp = bp_find(addr);
+    if (bp == -1) return SWD_OK;        // we don't have it? Error?
+    core->breakpoints[bp] = 0xffffffff;
+    rc = mem_write32(bp_reg[bp], 0);      // fully disabled
+    rc = mem_write32(bp_reg[bp], 0);      // fully disabled
+    return rc;
+}
+
+int bp_is_set(uint32_t addr) {
+    for (int i=0; i < 4; i++) {
+        if (core->breakpoints[i] == addr) return 1;
+    }
+    return 0;
+}
+
+
 int core_enable_debug() {
     return mem_write32(DCB_DHCSR, (0xA05F << 16) | 1);
 }
@@ -971,6 +1116,8 @@ int core_enable_debug() {
 int core_halt() {
     int rc;
     uint32_t value;
+
+    reg_flush_cache();
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<1) | 1);
 //    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
@@ -985,9 +1132,11 @@ int core_halt() {
 
 int core_unhalt() {
     int rc;
+    
+    reg_flush_cache();
 
-    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
-//    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
+//    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
+    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
     return SWD_OK;
     // TODO: more?
@@ -995,6 +1144,8 @@ int core_unhalt() {
 
 int core_unhalt_with_masked_ints() {
     int rc;
+
+    reg_flush_cache();
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
@@ -1004,15 +1155,22 @@ int core_unhalt_with_masked_ints() {
 
 int core_step() {
     int rc;
+    uint32_t pc;
     uint32_t value;
+    int      had_breakpoint = 0;
+
 
     // For both step and unhalt we need to see if there's a breakpoint at our
     // current location, if there is then we'll need to disable it, step, and
     // then re-enable it, otherwise we'll just keep breaking on it.
+    CHECK_OK(reg_read(REG_PC,&pc));
+    if (bp_is_set(pc)) {
+        bp_clr(pc);
+        had_breakpoint = 1;
+    }
 
     // step and !halt...
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<2) | (0<<1) | 1);
-//    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<2) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
 
     // Now wait for a halt again...
@@ -1021,6 +1179,12 @@ int core_step() {
         if (rc != SWD_OK) return rc;
         if (value & 0x00020000) break;
     }
+
+    if (had_breakpoint) {
+        bp_set(pc);
+    }
+
+    reg_flush_cache();
     return SWD_OK;
 }
 
@@ -1046,6 +1210,8 @@ int core_is_halted() {
 int core_reset_halt() {
     int rc;
     uint32_t value;
+
+    reg_flush_cache();
 
     // First halt the core...
     core_halt();
@@ -1076,43 +1242,6 @@ int core_reset_halt() {
     return rc;
 }
 
-#define BPCR        0xE0002000
-static uint32_t breakpoints[4] = { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
-static const uint32_t bp_reg[4] = { 0xE0002008, 0xE000200C, 0xE0002010, 0xE0002014 };
-
-int bp_find(uint32_t addr) {
-    for (int i=0; i < 4; i++) {
-        if (breakpoints[i] == addr) return i;
-    }
-    return -1;
-}
-
-int bp_set(uint32_t addr) {
-    int rc;
-    int bp = bp_find(addr);
-    if (bp != -1) return SWD_OK;        // already have it
-    bp = bp_find(0xffffffff);
-    if (bp == -1) return SWD_ERROR;     // no slots available
-
-    // Set the breakpoint...
-    breakpoints[bp] = addr;
-    rc = mem_write32(bp_reg[bp], 0xC0000000 | (addr & 0xfffffffc) | (1));
-    if (rc != SWD_OK) return rc;
-
-    // Turn on the breakpoint system...
-    rc = mem_write32(BPCR, (1<<1) | 1);
-    return rc;
-}
-
-int bp_clr(uint32_t addr) {
-    int rc;
-
-    int bp = bp_find(addr);
-    if (bp == -1) return SWD_OK;        // we don't have it? Error?
-    breakpoints[bp] = 0xffffffff;
-    rc = mem_write32(bp_reg[bp], 0);      // fully disabled
-    return rc;
-}
 
 
 

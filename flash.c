@@ -34,12 +34,14 @@
 #define FOR_TARGET          __attribute__((noinline, section("for_target")))
 #define DATA_BUFFER         0x20000000
 #define CODE_START          0x20010000
+#define BOOT2_START         0x20020000
 #define STACK_ADDDR         0x20040800
 #define FLASH_BASE          0x10000000
 
 extern int usb_n_printf(int n, char *format, ...);
 #define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
 
+static int flash_code_copied = 0;
 
 /**
  * @brief Called once the block is already on the target
@@ -53,13 +55,17 @@ extern int usb_n_printf(int n, char *format, ...);
 static int rp2040_program_flash_chunk(int offset, int length) {
     extern char __start_for_target[];
     extern char __stop_for_target[];
+    int rc;
 
     // Copy the code over ... only needed once per flashing cycle...
 
-    debug_printf("copying code\r\n");
-    int code_len = (__stop_for_target - __start_for_target);
-    int rc = mem_write_block(CODE_START, length, __start_for_target);
-    if (rc != SWD_OK) panic("fail");
+    if (!flash_code_copied) {
+        debug_printf("copying code\r\n");
+        int code_len = (__stop_for_target - __start_for_target);
+        rc = mem_write_block(CODE_START, length, __start_for_target);
+        if (rc != SWD_OK) panic("fail");
+        flash_code_copied = 1;
+    }
 
     uint32_t t = time_us_32();
 
@@ -104,6 +110,12 @@ int rp2040_add_flash_bit(uint32_t offset, uint8_t *src, int size) {
         chunk_size = 0;
     }
 
+    // If size is zero here then we are the last bit...
+    if (size == 0) {
+        flash_code_copied = 0;
+        return 0;
+    }
+
     while (size) {
         // If we are a new chunk...
         if (chunk_size == 0) {
@@ -114,12 +126,15 @@ int rp2040_add_flash_bit(uint32_t offset, uint8_t *src, int size) {
         int count = MIN(space, size);
 
         // Let's copy it over...
-        debug_printf("Copying over %d bytes to location 0x%08x\r\n", count, DATA_BUFFER+(offset-chunk_start));
+        uint32_t t = time_us_32();
+
         rc = mem_write_block(DATA_BUFFER + (offset - chunk_start), count, src);
         if (rc != SWD_OK) {
             debug_printf("COPY FAILED: %d\r\n", rc);
             return;
         }
+        debug_printf("Copied %d bytes to location 0x%08x (%d ms)\r\n", count, DATA_BUFFER+(offset-chunk_start),
+                                                                            (time_us_32() - t)/1000);
         chunk_size += count;
 
         // If we have a full one...
@@ -145,6 +160,7 @@ int rp2040_add_flash_bit(uint32_t offset, uint8_t *src, int size) {
 //
 // 0x2000 0000      64K incoming data buffer
 // 0x2001 0000      start of code
+// 0x2002 0000      stage2 bootloader copy
 // 0x2004 0800      top of stack 
 //
 
@@ -173,8 +189,21 @@ FOR_TARGET int flash_block(uint32_t offset, uint8_t *src, int length) {
     // with it's current contents...
 
     _connect_internal_flash();
-    _flash_flush_cache();
-    _flash_enter_cmd_xip();     // would be better to call the boot stage2 to speed things up
+//    _flash_flush_cache();
+//    _flash_enter_cmd_xip();     // would be better to call the boot stage2 to speed things up
+    _flash_exit_xip();
+
+    // If we are being called with a zero offset, then the block will include the bootloader
+    // so we can just copy it to use later...
+    if (offset == 0) {
+        uint32_t *s = (uint32_t *)src;
+        uint32_t *d = (uint32_t *)BOOT2_START;
+        for (int i=0; i < 64; i++) {
+            *d++ = *s++;
+        }
+    }
+    // Call the second stage bootloader... reconnect XIP
+    ((void (*)(void))BOOT2_START+1)();
 
     // Now lets get started...
     uint8_t     *changed[3];
@@ -244,7 +273,10 @@ done_check:
     flash_range_program(offset, src, length);
     // reconnect xip
     _flash_flush_cache();
-    _flash_enter_cmd_xip();
+//    _flash_enter_cmd_xip();
+    // Call the second stage bootloader... reconnect XIP
+    ((void (*)(void))BOOT2_START+1)();
+
     return rc;
 }
 
