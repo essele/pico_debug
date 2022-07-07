@@ -58,6 +58,12 @@ struct reg {
     int valid;
     uint32_t value;
 };
+struct memcache {
+    uint32_t addr;
+    uint32_t value;
+};
+
+#define MEM_CACHE_SIZE   4
 
 enum {
     STATE_UNKNOWN,
@@ -74,14 +80,16 @@ enum {
 };
 
 struct core {
-    int         state;
-    int         reason;
+    int                 state;
+    int                 reason;
 
-    uint32_t    dp_select_cache;
-    uint32_t    ap_mem_csw_cache;
+    uint32_t            dp_select_cache;
+    uint32_t            ap_mem_csw_cache;
 
-    uint32_t    breakpoints[4];
-    struct reg  reg_cache[24];
+    uint32_t            breakpoints[4];
+    struct reg          reg_cache[24];
+    struct memcache     mem_cache[MEM_CACHE_SIZE];
+    int                 mem_cache_pos;
 };
 
 
@@ -90,6 +98,33 @@ struct core cores[2];
 // Core will point at whichever one is current...
 struct core *core = &cores[0];
 
+// ----------------------------------------------------------------------------
+// Memory cache helper functions
+// ----------------------------------------------------------------------------
+
+#define IS_MEM_CACHEABLE(addr)      (addr < 0x30000000)
+
+int mem_cache_add(uint32_t addr, uint32_t value) {
+    core->mem_cache[core->mem_cache_pos].addr = addr;
+    core->mem_cache[core->mem_cache_pos++].value = value;
+    if (core->mem_cache_pos == MEM_CACHE_SIZE) core->mem_cache_pos = 0;
+}
+int mem_cache_find(uint32_t addr, uint32_t *res) {
+    for (int i=0; i < MEM_CACHE_SIZE; i++) {
+        if (core->mem_cache[i].addr == addr) {
+            *res = core->mem_cache[i].value;
+            debug_printf("cache hit!\r\n");
+            return SWD_OK;
+        }
+    }
+    return SWD_ERROR;
+}
+int mem_cache_clear() {
+    for (int i=0; i < MEM_CACHE_SIZE; i++) {
+        core->mem_cache[i].addr = 0xffffffff;
+    }
+    core->mem_cache_pos = 0;
+}
 
 // ----------------------------------------------------------------------------
 // Slightly Higher Level Functions
@@ -182,9 +217,13 @@ int core_select(int num) {
     uint32_t dpidr;
     uint32_t dlpidr;
     uint32_t targetid;
+
+    debug_printf("asked to select core %d\r\n", num);
     
     // See if we are already selected...
     if (core == &cores[num]) return SWD_OK;
+
+    debug_printf("actually selecting core %d\r\n", num);
     
     targetid = num == 0 ? 0x01002927 : 0x11002927;
 
@@ -203,6 +242,7 @@ int core_select(int num) {
 
     if ((dlpidr & 0xf0000000) != (targetid & 0xf0000000)) return SWD_ERROR;
 
+    debug_printf("core %d selected ok\r\n", num);
 
     return SWD_OK;
 }
@@ -399,9 +439,15 @@ static inline int ap_mem_set_csw(uint32_t value) {
 
 
 int mem_read32(uint32_t addr, uint32_t *res) {
+    // We implement a 4 word cache....    
+    if (IS_MEM_CACHEABLE(addr) && mem_cache_find(addr, res) == SWD_OK) return SWD_OK;
+
     CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_SINGLE | AP_MEM_CSW_32));
     CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
-    return ap_read(0, AP_MEM_DRW, res);
+    CHECK_OK(ap_read(0, AP_MEM_DRW, res));
+
+    if (IS_MEM_CACHEABLE(addr)) mem_cache_add(addr, *res);
+    return SWD_OK;
 }
 
 int mem_read8(uint32_t addr, uint8_t *res) {
@@ -604,24 +650,30 @@ int mem_read_block_aligned(uint32_t addr, uint32_t count, uint32_t *dest) {
 
 
 int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
-    uint16_t v16;
+    uint32_t v32;
 
-    // The first phase is getting to an aligned address if we aren't...
+    // If we have an unaligned starting point then let's read a full word
+    // and return the relevant bits so we don't do mulitple reads of the
+    // same word.
     if (addr & 3) {
-        if ((addr & 1) && count) {
-            CHECK_OK(mem_read8(addr++, dest++));
-            count--;
-            if (!count) return SWD_OK;
+        CHECK_OK(mem_read32(addr & 0xffffffffc, &v32));
+
+        switch (addr&3) {
+            case 1:     *dest++ = (v32 & 0xff00) >> 8; addr++;
+            case 2:     *dest++ = (v32 & 0xff0000) >> 16; addr++;
+            case 3:     *dest++ = v32 >> 24; addr++;
         }
-        if ((addr & 2) && count) {
-            if (count == 1) return mem_read8(addr, dest);
-            CHECK_OK(mem_read16(addr, &v16));
-            *dest++ = v16 & 0xff;
-            *dest++ = (v16 & 0xff00) >> 8;
-            count -= 2;
-            if (!count) return SWD_OK;
-            addr += 2;
-        }
+    }
+
+    // If we are just one aligned read...
+    if ((count & 0xfffffffc) == 4) {
+        CHECK_OK(mem_read32(addr, &v32));
+        *dest++ = (v32 & 0xff);
+        *dest++ = (v32 & 0xff00) >> 8;
+        *dest++ = (v32 & 0xff0000) >> 16;
+        *dest++ = v32 >> 24;
+        addr += 4;
+        count -= 4;
     }
 
     // At this point we have an aligned addr, see if we can optimise...
@@ -632,21 +684,19 @@ int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
             CHECK_OK(mem_read_block_unaligned(addr, (count & 0xfffffffc), dest));
         }
         dest += count & 0xfffffffc;
+        addr += count & 0xfffffffc;
         count = count & 3;
-        if (!count) return SWD_OK;
     }
 
-    // If we get here then we have some stragglers to deal with...
-    if (count & 2) {
-        CHECK_OK(mem_read16(addr, &v16));
-        *dest++ = v16 & 0xff;
-        *dest++ = (v16 & 0xff00) >> 8;
-        count -= 2;
-        if (!count) return SWD_OK;
-        addr += 2;
+    // If we have some stuff left then we can do a single read...
+    if (count) {
+        CHECK_OK(mem_read32(addr, &v32));
+        while (count--) {
+            *dest++ = (v32 & 0xff);
+            v32 >>= 8;
+        }
     }
-    // Must be one byte left to do...
-    return mem_read8(addr, dest);
+    return SWD_OK;
 }
 
 
@@ -810,6 +860,7 @@ int core_halt() {
     uint32_t value;
 
     reg_flush_cache();
+    mem_cache_clear();
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<1) | 1);
 //    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
@@ -826,6 +877,7 @@ int core_unhalt() {
     int rc;
     
     reg_flush_cache();
+    mem_cache_clear();
 
 //    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
@@ -839,6 +891,7 @@ int core_unhalt_with_masked_ints() {
     int rc;
 
     reg_flush_cache();
+    mem_cache_clear();
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
@@ -855,6 +908,7 @@ int core_step() {
     if (rc != SWD_OK) return rc;
 
     reg_flush_cache();
+    mem_cache_clear();
 
     core->state = STATE_RUNNING;
     return SWD_OK;
@@ -932,6 +986,7 @@ int check_cores() {
     core_update_status();
     if ((core->state == STATE_HALTED) && core->state != old_state) {
         // We must have stopped... so we should stop the other one
+        debug_printf("looks like core %d has halted\r\n", cur);
         to_halt = other;
         rc = cur;
     }
@@ -939,6 +994,7 @@ int check_cores() {
     old_state = core->state;
     core_update_status();
     if ((core->state == STATE_HALTED) && core->state != old_state) {
+        debug_printf("looks like core %d has halted\r\n", other);
         to_halt = cur;
         rc = other;
     }
@@ -973,6 +1029,7 @@ int core_reset_halt() {
     uint32_t value;
 
     reg_flush_cache();
+    mem_cache_clear();
 
     // First halt the core...
     core_halt();

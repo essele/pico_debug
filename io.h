@@ -11,5 +11,12 @@
 
 void io_poll();
 int io_get_byte();
+int io_peek_byte();
+
+int reply(char *text, uint8_t *hex, int hexlen);
+int reply_part(char ch, char *text, int len);
+int reply_null();
+int reply_ok();
+int reply_err(uint8_t err);
 
 #endif

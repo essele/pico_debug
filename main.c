@@ -107,7 +107,7 @@ uint32_t hex_word_le32(char *packet)
     return rc;
 }
 
-uint32_t hex_word_be32(char *packet)
+uint32_t Xhex_word_be32(char *packet)
 {
     uint32_t rc = 0;
     for (int i = 0; i < 8; i++)
@@ -125,12 +125,12 @@ uint32_t hex_word_be32(char *packet)
 // State variables and return variables for build_packet
 enum
 {
-    BP_INIT = 0, // get ready for a new packet
-    BP_START,    // waiting for the first char
-    BP_DATA,     // we've recevied the $ and are processing
-    BP_ESC,      // we've received the escape symbol (next is escaped)
-    BP_CHK1,     // first char of checksum
-    BP_CHK2,     // second char of checksum
+    BP_INIT = 0,    // get ready for a new packet
+    BP_START,       // waiting for the first char
+    BP_DATA,        // we've recevied the $ and are processing
+    BP_ESC,         // we've received the escape symbol (next is escaped)
+    BP_CHK1,        // first char of checksum
+    BP_CHK2,        // second char of checksum
 
     // Return codes...
     BP_ACK,
@@ -179,25 +179,22 @@ static int build_packet()
                     return BP_ACK;
                 if (ch == '-')
                     return BP_NACK;
-                if (ch == '$')
-                {
+                if (ch == '$') {
                     state = BP_DATA;
                     break;
                 }
+                debug_printf("ch=%d\r\n", ch);
                 if (ch == 0x3)
                     return BP_INTR;
-                debug_printf("ch=%d\r\n", ch);
                 return BP_GARBAGE;
 
             case BP_DATA:
-                if (ch == '#')
-                {
+                if (ch == '#') {
                     state = BP_CHK1;
                     break;
                 }
                 checksum += ch;
-                if (ch == '}')
-                {
+                if (ch == '}') {
                     state = BP_ESC;
                     break;
                 }
@@ -215,8 +212,7 @@ static int build_packet()
             case BP_CHK1:
                 *gdb_bp++ = 0; // zero terminate for ease later
                 digit = hex_digit(ch);
-                if (digit == -1)
-                {
+                if (digit == -1) {
                     state = BP_INIT;
                     return BP_CORRUPT;
                 }
@@ -226,22 +222,19 @@ static int build_packet()
 
             case BP_CHK2:
                 digit = hex_digit(ch);
-                if (digit == -1)
-                {
+                if (digit == -1) {
                     state = BP_INIT;
                     return BP_CORRUPT;
                 }
                 supplied_sum |= digit;
-                if (supplied_sum != checksum)
-                {
+                if (supplied_sum != checksum) {
                     state = BP_INIT;
                     return BP_CHKSUM_FAIL;
                 }
                 state = BP_INIT;
                 return BP_PACKET;
         }
-        if (gdb_blen == GDB_BUFFER_SIZE)
-        {
+        if (gdb_blen == GDB_BUFFER_SIZE) {
             debug_printf("BUFFER OVERFLOW\r\n");
             return BP_OVERFLOW;
         }
@@ -261,47 +254,6 @@ enum
     USB_PACKET, // we have a packet
     USB_ERROR,  // some error has occurred
 };
-
-char *packet_checksum(char *packet, int len)
-{
-    static char ckbuffer[3];
-    uint8_t ck = 0;
-
-    for (int i = 0; i < len; i++)
-        ck += packet[i];
-    sprintf(ckbuffer, "%02x", ck);
-    return ckbuffer;
-}
-
-volatile int yy;
-
-int send_packet(char *packet, int len)
-{
-    uint8_t sum = 0;
-    for (int i = 0; i < len; i++)
-        sum += packet[i];
-    debug_printf("Sending: $%.*s#%02x\r\n", len, packet, sum);
-    gdb_printf("$%.*s#%02x", len, packet, sum);
-    return 0;
-}
-
-int send_packet_with_leading_char(char ch, char *packet, int len)
-{
-    uint8_t sum = ch;
-    for (int i = 0; i < len; i++)
-        sum += packet[i];
-    debug_printf("Sending: $%c%.*s#%02x\r\n", ch, len, packet, sum);
-    gdb_printf("$%c%.*s#%02x", ch, len, packet, sum);
-    return 0;
-}
-
-int gdb_error(int err) {
-    char errstr[4];
-
-    snprintf(errstr, 4, "E%2.2X", err);
-    send_packet(errstr, 3);
-    return 0;
-}
 
 /**
  * @brief Decode a "filename:offset:length.." construct
@@ -332,7 +284,7 @@ void function_qSupported()
 {
     int len = sprintf(gen_buffer, "PacketSize=%x;qXfer:memory-map:read+;qXfer:features:read+;qXfer:threads:read+;QStartNoAckMode+;vContSupported+",
                       GDB_BUFFER_SIZE);
-    send_packet(gen_buffer, len);
+    reply(gen_buffer, NULL, 0);
 }
 
 /**
@@ -348,23 +300,19 @@ void function_xfer_thing(char *packet, char *content, int content_len)
     char symbol;
     char *p;
 
-    if (!decode_xfer_read(packet, &offset, &length))
-    {
-        gdb_error(1);
+    if (!decode_xfer_read(packet, &offset, &length)) {
+        reply_err(1);
         return;
     }
 
     p = content + offset;
-    if (offset + length > content_len)
-    {
+    if (offset + length > content_len) {
         length = content_len - offset;
         symbol = 'l';
-    }
-    else
-    {
+    } else {
         symbol = 'm';
     }
-    send_packet_with_leading_char(symbol, p, length);
+    reply_part(symbol, p, length);
 }
 
 void function_xfer_threads(char *packet)
@@ -372,7 +320,7 @@ void function_xfer_threads(char *packet)
     char *out = malloc(1024);
     if (!out)
     {
-        gdb_error(1);
+        reply_err(1);
         return;
     }
     sprintf(out, "<?xml version=\"1.0\"?>\n<threads>\n"
@@ -384,13 +332,11 @@ void function_xfer_threads(char *packet)
     free(out);
 }
 
-void function_get_sys_regs()
-{
+void function_get_sys_regs() {
     char buf[18 * 8];
     char *p = buf;
 
-    for (int i = 0; i <= 16; i++)
-    {
+    for (int i = 0; i <= 16; i++) {
         uint32_t rval;
         int rc;
 
@@ -401,11 +347,10 @@ void function_get_sys_regs()
                                                 (uint8_t)((rval & 0xff0000) >> 16), (uint8_t)(rval >> 24));
         p += 8;
     }
-    send_packet(buf, strlen(buf));
+    reply(buf, NULL, 0);
 }
 
-void function_get_reg(char *packet)
-{
+void function_get_reg(char *packet) {
     char buf[9];
     uint32_t rval;
     int reg = strtoul(packet, NULL, 16);
@@ -414,36 +359,30 @@ void function_get_reg(char *packet)
         panic("reg read failed");
     sprintf(buf, "%02x%02x%02x%02x", (uint8_t)(rval & 0xff), (uint8_t)((rval & 0xff00) >> 8), 
                                             (uint8_t)((rval & 0xff0000) >> 16), (uint8_t)(rval >> 24));
-    send_packet(buf, 8);
+    reply(buf, NULL, 0);
 }
 
-void function_put_reg(char *packet)
-{
+void function_put_reg(char *packet) {
     int reg;
     char *sep;
     uint32_t value;
     int rc;
 
     reg = strtoul(packet, &sep, 16);
-    if (*sep != '=')
-    {
-        send_packet(NULL, 0);
+    if (*sep != '=') {
+        reply_null();
         return;
     }
     value = hex_word_le32(sep + 1);
     rc = reg_write(reg, value);
-    if (rc != SWD_OK)
-    {
-        gdb_error(1);
-    }
-    else
-    {
-        send_packet("OK", 2);
+    if (rc != SWD_OK) {
+        reply_err(1);
+    } else {
+        reply_ok();
     }
 }
 
-char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two)
-{
+char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two) {
     char *sep;
     char *end;
 
@@ -454,51 +393,40 @@ char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two
     return end;
 }
 
-void function_memread(char *packet)
-{
+void function_memread(char *packet) {
+    uint8_t small_buf[10];
     char *sep;
     uint32_t addr;
     uint32_t len;
 
     addr = strtoul(packet, &sep, 16);
-    if (*sep != ',')
-    {
-        send_packet(NULL, 0);
+    if (*sep != ',') {
+        reply_null();
         return;
     }
     len = strtoul(sep + 1, NULL, 16);
-    if (!len)
-    {
-        send_packet(NULL, 0);
+    if (!len) {
+        reply_null();
         return;
     }
 
+    // If we are a small request then use the small buffer...
+    if (len <= 4) {
+        rc = mem_read_block(addr, len, small_buf);
+        reply(NULL, small_buf, len);
+        return;
+    }
+
+    // Otherwise we'll need to malloc one...
     char *buffer = malloc(len); // make sure we have enough space
-    if (!buffer)
-    {
-        send_packet(NULL, 0);
+    if (!buffer) {
+        reply_null();
         return;
     }
     rc = mem_read_block(addr, len, (uint8_t *)buffer);
-
-    char *out = malloc((len * 2) + 1);
-    if (!out)
-    {
-        send_packet(NULL, 0);
-        return;
-    }
-
-    char *p = buffer;
-    char *o = out;
-    int i = len;
-    while (i--)
-    {
-        sprintf(o, "%02x", *p++);
-        o += 2;
-    }
-    send_packet(out, len * 2);
-    free(out);
+    reply(NULL, buffer, len);
     free(buffer);
+    return;
 }
 
 void function_memwrite(char *packet)
@@ -509,7 +437,7 @@ void function_memwrite(char *packet)
 
     if (!p || *p != ':' || !length)
     {
-        send_packet(NULL, 0);
+        reply_null();
         return;
     }
     packet = p + 1;
@@ -533,18 +461,29 @@ void function_memwrite(char *packet)
     if (rc != SWD_OK)
     {
         debug_printf("mem write failed\r\n");
-        send_packet(NULL, 0);
+        reply_null();
         return;
     }
-    send_packet("OK", 2);
+    reply_ok();
 }
 
 void send_stop_packet(int thread, int reason) {
     char buf[16];
 
     sprintf(buf, "T%02dthread:%d;", reason, thread);
-    send_packet(buf, strlen(buf));
+    reply(buf, NULL, 0);
 }
+
+// New vCont thinking ...
+//
+// This is actually a blocking process, so it should start/step the cores
+// and then enter a loop to detect if one of them has stopped, then stop
+// the other one.
+//
+// At the same time we need to check for a CTRL-C coming in
+//
+
+
 
 void function_vcont(char *packet)
 {
@@ -556,7 +495,7 @@ void function_vcont(char *packet)
     if (*packet == '?')
     {
         static const char vcont[] = "vCont;c;C;s;S";
-        send_packet((char *)vcont, sizeof(vcont) - 1);
+        reply((char *)vcont, NULL, 0);
         return;
     }
     if (strncmp(packet, ";s:1;c", 6) == 0) {
@@ -576,26 +515,49 @@ void function_vcont(char *packet)
     // Something will be running...
     gdb_check_for_halt = 1;
 
-    // Current core...
-    if (action[cur] == CORE_STEP) {
-        debug_printf("stepping core %d\r\n", cur);
-        core_step();
-        //send_stop_packet(cur+1, 5);
-    } else {
-        debug_printf("unhalting core %d\r\n", cur);
+    // We need to ensure the non-stepping core is running first
+    // otherwise things like timers may not function properly.
+    if (action[other] == CORE_RUN) {
+        core_select(other);
+        debug_printf("unhalting core\r\n");
         core_unhalt();
     }
-    // Other core...
-    core_select(other);
+    if (action[cur] == CORE_RUN) {
+        core_select(cur);
+        debug_printf("unhalting core\r\n");
+        core_unhalt();
+    }
     if (action[other] == CORE_STEP) {
-        debug_printf("stepping core %d\r\n", other);
+        core_select(other);
+        debug_printf("stepping core\r\n");
         core_step();
-        //send_stop_packet(other+1, 5);
-    } else {
-        debug_printf("unhalting core %d\r\n", other);
-        core_unhalt();
     }
+    if (action[cur] == CORE_STEP) {
+        core_select(cur);
+        debug_printf("stepping core\r\n");
+        core_step();
+    }
+
     core_select(cur);
+
+    while(1) {
+        task_sleep_ms(200);
+        debug_printf("in loop\r\n");
+        int rc = check_cores();
+        if (rc != -1) {
+            debug_printf("CORE %d has halted\r\n", rc);
+            send_stop_packet(rc+1, 5);
+            break;
+        }
+        int ch = io_peek_byte();
+        debug_printf("io peek = %d\r\n", ch);
+        // If we have CTRL-C then we need to stop ourselves...
+        if (io_peek_byte() == 0x03) {
+            debug_printf("Have CTRL-C\r\n");
+            core_halt();
+            continue;
+        }
+    }
 }
 
 static char hex_digits[] = "0123456789abcdef";
@@ -628,14 +590,14 @@ void function_rcmd(char *packet, int len)
     if (strncmp(packet, "reset halt", 10) == 0)
     {
         core_reset_halt();
-        send_packet("OK", 2);
+        reply_ok();
         return;
     }
-    gdb_error(1);
+    reply_err(1);
     return;
 
 error:
-    gdb_error(1);
+    reply_err(1);
 }
 
 void function_XX()
@@ -681,8 +643,7 @@ void function_XX()
         debug_printf("execute CX failed\r\b");
         return;
     }
-
-    send_packet("OK", 2);
+    reply_ok();
 }
 
 void function_vflash_erase(char *packet)
@@ -692,10 +653,10 @@ void function_vflash_erase(char *packet)
 
     if (!p || !length)
     {
-        gdb_error(1);
+        reply_err(1);
         return;
     }
-    send_packet("OK", 2);
+    reply_ok();
     return;
 }
 
@@ -735,40 +696,35 @@ void function_vflash_write(char *packet, int len)
     rp2040_add_flash_bit(start & 0x00ffffff, (uint8_t *)p, len);
     free(p);
 
-    send_packet("OK", 2);
+    reply_ok();
     return;
 }
 
-void function_vflash_done()
-{
+void function_vflash_done() {
     // Flush anything left...
     rp2040_add_flash_bit(0xffffffff, NULL, 0);
 
-    send_packet("OK", 2);
+    reply_ok();
     return;
 }
 
-void function_add_breakpoint(char *packet)
-{
+void function_add_breakpoint(char *packet) {
     uint32_t addr, size;
-    if (!get_two_hex_numbers(packet, ',', &addr, &size))
-    {
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
         debug_printf("bp set syntax\r\n");
         return;
     }
     bp_set(addr);
-    send_packet("OK", 2);
+    reply_ok();
 }
-void function_remove_breakpoint(char *packet)
-{
+void function_remove_breakpoint(char *packet) {
     uint32_t addr, size;
-    if (!get_two_hex_numbers(packet, ',', &addr, &size))
-    {
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
         debug_printf("bp clr syntax\r\n");
         return;
     }
     bp_clr(addr);
-    send_packet("OK", 2);
+    reply_ok();
 }
 
 int get_threadid(char *packet) {
@@ -783,9 +739,9 @@ void function_thread(char *packet, int packet_size) {
         packet++;
         tid = get_threadid(packet);
         if (tid == 1 || tid == 2) {
-            send_packet("OK", 2);
+            reply_ok();
         } else {
-            gdb_error(1);
+            reply_err(1);
         }        
     } else if (*packet == 'H') {
         int num;
@@ -795,7 +751,7 @@ void function_thread(char *packet, int packet_size) {
         if (*packet == 'c') {
             // Continue....
             tid = get_threadid(packet+1);
-            send_packet("OK", 2);
+            reply_ok();
             return;
         }
         if (*packet == 'g') { 
@@ -805,19 +761,19 @@ void function_thread(char *packet, int packet_size) {
             } else if (tid == 2) {
                 num = 1;
             } else {
-                gdb_error(1); 
+                reply_err(1);
                 return;
             }
             rc = core_select(num);
             if (rc != SWD_OK) {
                 debug_printf("CORE SELECT FAILED\r\n");
-                gdb_error(1);
+                reply_err(1);
             } else {
-                send_packet("OK", 2);
+                reply_ok();
             }
             return;
         }
-        gdb_error(1);
+        reply_err(1);
     }
 }
 
@@ -842,12 +798,12 @@ void process_packet(char *packet, int packet_size)
     }
     else if (strncmp(packet, "QStartNoAckMode", 15) == 0)
     {
-        send_packet("OK", 2);
+        reply_ok();
         gdb_noack = 1;
     }
     else if (strncmp(packet, "vMustReplyEmpty", 15) == 0)
     {
-        send_packet(NULL, 0);
+        reply_null();
     }
     else if (strncmp(packet, "qXfer:features:read:", 20) == 0)
     {
@@ -864,16 +820,16 @@ void process_packet(char *packet, int packet_size)
     }
     else if (strncmp(packet, "qAttached", 9) == 0)
     {
-        send_packet("1", 1);
+        reply("1", NULL, 0);
     }
     else if (strncmp(packet, "qSymbol::", 9) == 0)
     {
-        send_packet("OK", 2);
+        reply_ok();
     }
     else if (strncmp(packet, "?", 1) == 0)
     {
         // TODO:!!!!!
-        send_packet("S00", 3);
+        reply("S00", NULL, 0);
     }
     else if (strncmp(packet, "H", 1) == 0)
     {
@@ -883,17 +839,16 @@ void process_packet(char *packet, int packet_size)
     else if (strncmp(packet, "qC", 2) == 0)
     {
         // RTOS thread?
-        //        send_packet("QC0", 3);
         if (core_get() == 0) {
-            send_packet("QC0000000000000001", 18);
+            reply("QC0000000000000001", NULL, 0);
         } else {
-            send_packet("QC0000000000000002", 18);
+            reply("QC0000000000000002", NULL, 0);
         }
     }
     else if (strncmp(packet, "qOffsets", 8) == 0)
     {
         static const char offsets[] = "Text=0;Data=0;Bss=0";
-        send_packet((char *)offsets, sizeof(offsets) - 1);
+        reply((char *)offsets, NULL, 0);
     }
     else if (strncmp(packet, "g", 1) == 0)
     {
@@ -952,7 +907,7 @@ void process_packet(char *packet, int packet_size)
     else
     {
         // Not supported...
-        send_packet(NULL, 0);
+        reply_null();
     }
 
     // Really need to copy buffer along if there's any left
@@ -1041,7 +996,6 @@ void func_test(void *arg) {
         usb_poll();
     }
 }
-
 
 int main() {
     // Take us to 150Mhz (for future rmii support)
