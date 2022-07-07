@@ -10,19 +10,24 @@ This is very much work-in-progress and will develop over time, currently working
 - Very very basic GDB server (over USB CDC) to eliminate need for OpenOCD
 - Orders of magnitude better performance
 - Delta based flashing (only program if the different)
+- Comparing full flashing (not delta) for a 276K image: pico-probe is 17kb/s or 16s. This is 94kb/s or 3s!
+- Small memory cache for optimising GDB reads (todo: flush on write)
+- Efficient co-operative multitasking speeds up transfers
 - NOWHERE NEAR COMPLETE OR PROPERLY TESTED
 
 Still to do:
 
-- Second core support
 - Proper handling of maskints for halt/step/continue
+- Streaming flashing to avoid waiting for full buffer
+- Multi-core flashing so we don't wait for erase
+- Better multi-core handling
 - LOTS 
 
 ## Background
 
-I've been working on a fairly long term RP2040 project (on a custom board) and it's been progressing well, however as I've incorportated more into the build, including a growing number of static files, the debug time has increased signficantly ... mostly because it takes over 10 seconds to flash the >200kb image that I currently have.
+I've been working on a fairly long term RP2040 project (on a custom board) and it's been progressing well, however as I've incorportated more into the build, including a growing number of static files, the debug time has increased signficantly ... mostly because it takes well over 10 seconds to flash the >200kb image that I currently have.
 
-I envisage that the image could well grow to 3 times that, and having to wait 30 seconds for each debug attempt was going to become untennable.
+I envisage that the image could well grow to 3 times that, and having to wait 30 seconds or more for each debug attempt was going to become untennable.
 
 I did have an experiement with the J-Link EDU Mini which was much better, but didn't work with my custom board ... I think it uses a specific flash helper rather than the standard ROM routines, and this didn't work with the slightly different flash on my board (and there wasn't a huge amount of interest in resolving this!)
 
@@ -52,7 +57,8 @@ All of these issues compound and you get overall poor debug performance and slow
 
 **4. Delta based flashing** ... when flashing a device I copy the code over as the requests come in, once it gets to 64K then it runs a comparison if there are only minor differences (up to two 4k pages) then only they are flashed, anything more and the whole 64K chunk is done. This results is signficantly improved flashing times, and no flashing if the code is the same!
 
-With all of the above you get much quicker flashing times and a much more (almost instant) debug experience when stepping through code. I haven't done proper timed comparisons yet, but the 10s flashing time mentioned above seems to come down to 3s -- a large part of which is the 64K block erase time. 
+**5. Memory Cache** ... I've added a small (4 words) memory cache which is cleared whenever a core halts, this means that many of the inefficiencies about how GDB reads memory on a halt are covered and it doesn't require an SWD read.
 
+With all of the above you get much quicker flashing times and a much more (almost instant) debug experience when stepping through code. I haven't done normal debug cycle comparisons yet, but forced full flash timings are significantly better (3s vs 16s) and I have some further thoughts about double buffering do I can continue to transfer data while I'm waiting for the erase/programming to happen.
 
 Note: prior to starting work on this I had zero knowledge of SWD, zero knowledge of the internals of ARM debugging, and very little understanding of GDB, so this has been a huge learning curve and there will be a myriad of mistakes that need fixing!
