@@ -10,12 +10,16 @@ This is very much work-in-progress and will develop over time, currently working
 - Very very basic GDB server (over USB CDC) to eliminate need for OpenOCD
 - Orders of magnitude better performance
 - Delta based flashing (only program if the different)
+- Small memory cache for optimising GDB reads (todo: flush on write)
+- Efficient co-operative multitasking speeds up transfers
 - NOWHERE NEAR COMPLETE OR PROPERLY TESTED
 
 Still to do:
 
-- Second core support
 - Proper handling of maskints for halt/step/continue
+- Streaming flashing to avoid waiting for full buffer
+- Multi-core flashing so we don't wait for erase
+- Better multi-core handling
 - LOTS 
 
 ## Background
