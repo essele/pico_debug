@@ -260,12 +260,14 @@ void __time_critical_func(switchContext)() {
 //            update_timewait_tasks(delta);
 //        }
 //    }    
-    
-    // Pop the next item from the task list... and run IDLE if there aren't
-    // any.
-    struct task *task = LIST_POP(&ready_list, task, struct task *);
-    if (!task) {
+
+    // Pop the next item from the ready list, we run IDLE if there aren't
+    // any, or if it's the task we just yielded from...
+    struct task *task = ready_list.head;
+    if ((task == NULL) || (task == prior)) {
         task = &idle_TCB;
+    } else {
+        task = LIST_POP(&ready_list, task, struct task *);
     }
     task->state = RUNNING;
     currentTCB = task;

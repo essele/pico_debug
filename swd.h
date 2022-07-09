@@ -27,4 +27,8 @@ int swd_read(int APnDP, int addr, uint32_t *result);
 int swd_write(int APnDP, int addr, uint32_t value);
 void swd_send_bits(uint32_t *data, int bitcount);
 
+void swd_line_reset();
+void swd_from_dormant();
+void swd_to_dormant();
+
 #endif

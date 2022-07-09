@@ -23,6 +23,10 @@ add_executable(pico-debug
 
     flash.c flash.h
     io.c io.h
+
+    gdb.c gdb.h
+
+    utils.c utils.h
     
     filedata.c filedata.h
 

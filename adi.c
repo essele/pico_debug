@@ -34,6 +34,8 @@ extern int usb_n_printf(int n, char *format, ...);
 #define WDATAERR            (1<<7)
 #define SWDERRORS           (STICKYORUN|STICKYCMP|STICKYERR)    
 
+#define CDBGRSTREQ          (1<<26)
+#define CDBGRSTACK          (1<<27)
 #define CDBGPWRUPREQ        (1<<28)
 #define CDBGPWRUPACK        (1<<29)
 #define CSYSPWRUPREQ        (1<<30)
@@ -200,22 +202,11 @@ int dp_write(uint32_t addr, uint32_t value) {
     return swd_write(0, addr & 0xf, value);
 }
 
-// Reset is at least 50 bits of 1 followed by zero's
-static const uint32_t reset_seq[] = { 0xffffffff, 0x0003ffff };
 
-// Selection alert sequence... 128bits
-static const uint32_t selection_alert_seq[] = { 0x6209F392, 0x86852D95, 0xE3DDAFE9, 0x19BC0EA2 };
-
-// Zero sequence...
-static const uint32_t zero_seq[] = { 0x00000000 };
-static const uint32_t ones_seq[] = { 0xffffffff };
-
-// Activation sequence (8 bits)
-static const uint32_t act_seq[] = { 0x1a };
 
 int core_select(int num) {
-    uint32_t dpidr;
-    uint32_t dlpidr;
+    uint32_t dpidr = 0;
+    uint32_t dlpidr = 0;
     uint32_t targetid;
 
     debug_printf("asked to select core %d\r\n", num);
@@ -227,18 +218,38 @@ int core_select(int num) {
     
     targetid = num == 0 ? 0x01002927 : 0x11002927;
 
-    swd_send_bits((uint32_t *)reset_seq, 52);
+    swd_line_reset();
     swd_targetsel(targetid);
 
     // Now read the DPIDR register... this must be next (so swd_read)
-    CHECK_OK(swd_read(0, DP_DPIDR, &dpidr));
+//    CHECK_OK(swd_read(0, DP_DPIDR, &dpidr));
+    int rc;
+    uint32_t rv;
+    rc = swd_read(0, DP_DPIDR, &rv);
+    debug_printf("after targetsel rc=%d rv=0x%08x\r\n", rc, rv);
 
+    // Now clear any errors...
+    CHECK_OK(swd_write(0, DP_ABORT, ALLERRCLR));
+
+/*
+    // Let's try a debug reset...
+    rc = swd_write(0, DP_CTRL_STAT, CDBGRSTREQ|CDBGPWRUPREQ|CSYSPWRUPREQ);
+    while (1) {
+        rc = swd_read(0, DP_CTRL_STAT, &rv);
+        if (rv & CDBGPWRUPACK) break;
+        debug_printf("rc=%d rv=0x%08x\r\n", rc, rv);
+    }
+    debug_printf("reset complete");
+    rc = swd_write(0, DP_CTRL_STAT, 0);
+*/
     // Need to switch the core here for dp_read to work...
     core = &cores[num];
 
     // If that was ok we can validate the switch by checking the TINSTANCE part of
     // DLPIDR
     CHECK_OK(dp_read(DP_DLPIDR, &dlpidr));
+    
+    debug_printf("HAVE DPIDR=%08x DLPIDR=%08x\r\n", dpidr, dlpidr);
 
     if ((dlpidr & 0xf0000000) != (targetid & 0xf0000000)) return SWD_ERROR;
 
@@ -251,10 +262,61 @@ int core_get() {
     return (core == &cores[0]) ? 0 : 1;
 }
 
+/**
+ * @brief Use the rescue dp to perform a hardware reset
+ * 
+ * @return int 
+ */
+int dp_rescue_reset() {
+    int rc;
+    uint32_t rv;
+    const uint32_t zero[] = { 0 };
+
+    debug_printf("Attempting rescue_dp reset\r\n");
+
+    swd_from_dormant();
+    swd_line_reset();
+    swd_targetsel(0xf1002927);
+    rc = swd_read(0, DP_DPIDR, &rv);
+    if (rc != SWD_OK) {
+        debug_printf("rescue failed (DP_IDR read rc=%d)\r\n", rc);
+        return rc;
+    }
+
+    // Now toggle the power request which will cause the reset...
+    rc = swd_write(0, DP_CTRL_STAT, CDBGPWRUPREQ);
+    debug_printf("RESET rc=%d\r\n", rc, rv);
+    rc = swd_write(0, DP_CTRL_STAT, 0);
+    debug_printf("RESET rc=%d\r\n", rc, rv);
+
+    // Make sure the write completes...
+    swd_send_bits((uint32_t *)zero, 8);
+
+    // And delay a bit... no idea how long we need, but we need something.
+    for (int i=0; i < 2; i++) {
+        swd_send_bits((uint32_t *)zero, 32);
+    }
+    return SWD_OK;
+}
+
 
 /**
  * @brief Send the required sequence to reset the line and start SWD ops
+ *  
+ * Need to rethink how we do this....
  * 
+ * dp_core_select -- selects a core, reads DLIPR and CTRLSTAT
+ * 
+ * swd_from_dormant()
+ * dp_core_select(0) -- if failure, then reset -- and start again
+ *  otherwise power-on and enable debug
+ * dp_core_select(1) -- if failure, then reset -- and start again
+ *  otherwise power-on and enable debug
+ * -- should have both cores working here
+ * 
+ * 
+ * 
+ *  
  */
 int dp_initialise() {
     int rc;
@@ -273,26 +335,104 @@ int dp_initialise() {
     }
     core = NULL;
 
-//    swd_send_bits(reset_seq, 64);   // includes zeros
-    swd_send_bits((uint32_t *)ones_seq, 8);
-    swd_send_bits((uint32_t *)selection_alert_seq, 128);
-    swd_send_bits((uint32_t *)zero_seq, 4);
-    swd_send_bits((uint32_t *)act_seq, 8);
-    swd_send_bits((uint32_t *)ones_seq, 8);
-    swd_send_bits((uint32_t *)reset_seq, 64);   // includes zeros
+    // Lets try to select our first core...
+    uint32_t rv;
 
-    // Now a reset sequence
-//    swd_send_bits((uint32_t *)reset_seq, 64);
+    // The process here is...
+    //
+    // 1. Try normal select.
+    // 2. Try again normally.
+    // 3. Reset, and try aain...
+
+    for (int i=0; i < 3; i++) {
+
+        if (i == 2) dp_rescue_reset();
+
+        swd_from_dormant();
+        swd_line_reset();
+        swd_targetsel(0x01002927);
+
+        rc = swd_read(0, DP_DPIDR, &rv);
+        debug_printf("dp_init: (%d) -- DPIDR rc=%d rv=0x%08x\r\n", i, rc, rv);
+        if (rc != SWD_OK) continue;
+
+        // We have read DPIDR, lets see if we an do more...
+        if (swd_write(0, DP_ABORT, ALLERRCLR) != SWD_OK) continue;
+        if (swd_write(0, DP_SELECT, 0) != SWD_OK) continue;
+        if (swd_read(0, DP_CTRL_STAT, &rv) != SWD_OK) continue;
+        debug_printf("On iteration %d, have CTRL_STAT reading of 0x%08x\r\n", i, rv);
+        break;
+
+        rc = SWD_ERROR;     // otherwise it's an error
+    }
+    if (rc != SWD_OK) {
+        panic("failed to select first core after some attempts\r\n");
+    }
 
 
-//    swd_targetsel(0x01002927);
-//    swd_send_bits((uint32_t *)zero_seq, 20);
+/*
+    // Lets try a power up request
+    rc = swd_write(0, DP_CTRL_STAT, (CDBGPWRUPREQ|CSYSPWRUPREQ));
+    debug_printf("rc=%d\r\n", rc);
+    swd_send_bits(&zero, 8);
+    rc = swd_read(0, DP_CTRL_STAT, &rv);
+    debug_printf("rc=%d rv=0x%08x\r\n", rc, rv);
+*/
 
-    // Now read the status register... this must be next (so swd_read)
-//    rc = swd_read(0, 0, &id);
-//    if (rc != SWD_OK) return rc;
+/*
+    // Clear errors
+    rc = swd_write(0, DP_ABORT, ALLERRCLR);
+    // Try a DP_ABORT
+    rc = swd_write(0, DP_ABORT, DAP_ABORT);
+    debug_printf("rc=%d\r\n", rc);
+*/
 
-    core_select(0);
+    // Now try to read DP_DLIDR (bank 3)
+    rc = swd_write(0, DP_SELECT, 0x3);
+    if (rc != SWD_OK) {
+        debug_printf("rc=%d\r\n", rc);
+    }
+    rc = swd_read(0, 0x4, &rv);
+    debug_printf("DP_DLIDR rc=%d val=0x%08x\r\n", rc, rv);
+
+
+
+    swd_line_reset();
+    swd_targetsel(0x01002927);
+    rv = 0;
+    rc = swd_read(0, DP_DPIDR, &rv);
+    debug_printf("DP_DLIDR rc=%d val=0x%08x\r\n", rc, rv);
+
+
+
+
+
+//    core_select(0);
+
+    // See if we can read the CTRL_STAT register
+    rc = swd_read(0, DP_CTRL_STAT, &rv);
+    debug_printf("CTRL/STAT rc=%d val=0x%08x\r\n", rc, rv);
+    
+    // Clear any errors
+    rc = swd_write(0, DP_ABORT, ALLERRCLR);
+    debug_printf("ALLERR clear result = %d\r\n", rc);
+
+    // Lets write the select register
+    rc = swd_write(0, DP_SELECT, 0);
+    debug_printf("SELECT WRITE result = %d\r\n", rc);
+
+    // Lets see if we have any strange status bits...
+    uint32_t status;
+    rc = swd_read(0, DP_CTRL_STAT, &status);
+    debug_printf("CORE 0: status read rc=%d value=0x%08x\r\n", rc, status);
+
+    // If we get a failure, try a dap abort...
+    if (rc != SWD_OK) {
+        rc = swd_write(0, DP_ABORT, DAP_ABORT);
+        debug_printf("DAP ABORT rc=%d\r\n", rc);
+        rc = swd_read(0, DP_CTRL_STAT, &status);
+        debug_printf("re-read of status read rc=%d value=0x%08x\r\n", rc, status);
+    }
 
     // And then try to clear any errors...
     rc = swd_write(0, DP_ABORT, ALLERRCLR);
@@ -310,6 +450,11 @@ int dp_initialise() {
  */
 int dp_power_on() {
     uint32_t    rv;
+    int         rc;
+
+    // First lets clear any errors...
+    rc = swd_write(0, DP_ABORT, ALLERRCLR);
+    if (rc != SWD_OK) return rc;
 
     for (int i=0; i < 10; i++) {
         // Attempt to power up...
@@ -318,6 +463,10 @@ int dp_power_on() {
         if (rv & SWDERRORS) continue;
         if (!(rv & CDBGPWRUPACK)) continue;
         if (!(rv & CSYSPWRUPACK)) continue;
+
+        debug_printf("ctrl stat read was working, trying again\r\n");
+        rc = dp_read(DP_CTRL_STAT, &rv);
+        debug_printf("rc=%d value=0x%08xr\n", rc, rv);
         return SWD_OK;
     }
     return SWD_ERROR;
@@ -702,14 +851,6 @@ int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
 
 
 
-volatile int ret;
-
-
-static volatile uint32_t xx;
-static volatile uint32_t id;
-//static volatile uint32_t rc;
-
-uint32_t buffer[100];
 
 int dp_init() {
     // Initialise and switch out of dormant mode (select target 0)

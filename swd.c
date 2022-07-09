@@ -370,3 +370,36 @@ void swd_send_bits(uint32_t *data, int bitcount) {
     // Do we need a sacrificial word?
     if (bitcount == 0) lerp_sm_put_blocking(swd_pio, swd_sm, 0); 
 }
+
+void swd_line_reset() {
+    // Reset is at least 50 bits of 1 followed by at least 2 zero's
+    static const uint32_t reset_seq[] = { 0xffffffff, 0x0003ffff };
+
+    swd_send_bits((uint32_t *)reset_seq, 52);
+}
+
+void swd_from_dormant() {
+    // Selection alert sequence... 128bits
+    static const uint32_t selection_alert_seq[] = { 0x6209F392, 0x86852D95, 0xE3DDAFE9, 0x19BC0EA2 };
+
+    // Zeros and ones sequences...
+    static const uint32_t zero_seq[] = { 0x00000000 };
+    static const uint32_t ones_seq[] = { 0xffffffff };
+
+    // Activation sequence (8 bits)
+    static const uint32_t act_seq[] = { 0x1a };
+
+    swd_send_bits((uint32_t *)ones_seq, 8);
+    swd_send_bits((uint32_t *)selection_alert_seq, 128);
+    swd_send_bits((uint32_t *)zero_seq, 4);
+    swd_send_bits((uint32_t *)act_seq, 8);
+
+    // At this point SWD will be in protocol error state, so needs a reset
+}
+
+void swd_to_dormant() {
+    static const uint32_t to_dorm_seq[] = { 0xe3bc };
+
+    swd_line_reset();
+    swd_send_bits((uint32_t *)to_dorm_seq, 16);
+}

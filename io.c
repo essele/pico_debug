@@ -1,5 +1,5 @@
 
-
+#include "pico/printf.h"
 #include "lerp/task.h"
 #include "lerp/circ.h"
 #include "io.h"
@@ -27,8 +27,14 @@ static int refill_from_usb()
 {
     int count = 0;
 
-    if (!tud_cdc_connected())
+    // Track disconnects...
+    if (!tud_cdc_connected()) {
+        if (waiting_on_input) {
+            task_wake(waiting_on_input, IO_DISCONNECT);
+            waiting_on_input = NULL;
+        }
         return 0;
+    }
 
     // If we go around the end we'll need to call this twice...
     int space = circ_space_before_wrap(incoming);
@@ -47,6 +53,10 @@ static int refill_from_usb()
         waiting_on_input = NULL;
     }
     return count;
+}
+
+int io_is_connected() {
+    return tud_cdc_connected();
 }
 
 int io_get_byte() {
@@ -155,6 +165,7 @@ int reply_part(char ch, char *text, int len) {
     io_put_hexbyte(sum);
     // For debug (remove this)
     if (tud_cdc_n_connected(1)) { tud_cdc_n_write_char(1, '\r'); tud_cdc_n_write_char(1, '\n'); }
+    return 0;
 }
 int reply_null() {
     return reply(NULL, NULL, 0);
@@ -166,6 +177,33 @@ int reply_ok() {
 
 int reply_err(uint8_t err) {
     return reply("E", &err, 1);
+}
+
+static void _reply_out(char ch, void *arg) {
+    uint8_t *sp = (uint8_t *)arg;
+
+    *sp += ch;
+    io_put_byte(ch);
+}
+
+int reply_printf(char *format, ...) {
+    uint8_t sum = 0;
+    int len;
+
+    io_put_byte('$');
+
+    va_list args;
+    va_start(args, format);
+    len = vfctprintf(_reply_out, &sum, format, args);
+    va_end(args);
+
+    io_put_byte('#');
+    io_put_hexbyte(sum);
+
+    // For debug (remove this)
+    if (tud_cdc_n_connected(1)) { tud_cdc_n_write_char(1, '\r'); tud_cdc_n_write_char(1, '\n'); }
+
+    return len;
 }
 
 
