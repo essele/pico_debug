@@ -566,7 +566,7 @@ void function_vflash_done() {
     return;
 }
 
-void function_add_breakpoint(char *packet) {
+void function_add_hw_breakpoint(char *packet) {
     uint32_t addr, size;
     if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
         debug_printf("bp set syntax\r\n");
@@ -575,13 +575,73 @@ void function_add_breakpoint(char *packet) {
     bp_set(addr);
     reply_ok();
 }
-void function_remove_breakpoint(char *packet) {
+void function_remove_hw_breakpoint(char *packet) {
     uint32_t addr, size;
     if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
         debug_printf("bp clr syntax\r\n");
         return;
     }
     bp_clr(addr);
+    reply_ok();
+}
+
+struct swbp {
+    struct swbp *next;
+    uint32_t    addr;
+    int         size;
+    uint32_t    orig;
+};
+struct swbp *sw_breakpoints = NULL;
+
+struct swbp *find_swbp(uint32_t addr) {
+    struct swbp *p = sw_breakpoints;
+    while (p) {
+        if (p->addr == addr) return p;
+    }
+    return NULL;
+}
+
+void function_add_sw_breakpoint(char *packet) {
+    uint32_t addr, size;
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
+        debug_printf("sw bp set syntax\r\n");
+        return;
+    }
+    if (!find_swbp(addr)) {
+        struct swbp *bp = malloc(sizeof(struct swbp));
+        bp->addr = addr;
+        bp->size = size;
+        mem_read_block(addr, size, (uint8_t *)&bp->orig);
+        uint32_t code = 0xbe11be11;
+        mem_write_block(addr, size, (uint8_t *)&code);
+        bp->next = sw_breakpoints;
+        sw_breakpoints = bp;
+    }
+    reply_ok();
+}
+void function_remove_sw_breakpoint(char *packet) {
+    uint32_t addr, size;
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
+        debug_printf("sw bp clr syntax\r\n");
+        return;
+    }
+    struct swbp *bp = find_swbp(addr);
+    if (bp) {
+        mem_write_block(bp->addr, bp->size, (uint8_t *)&bp->orig);
+        if (sw_breakpoints == bp) {
+            sw_breakpoints = bp->next;
+        } else {
+            struct swbp *p = sw_breakpoints;
+            while (p) {
+                if (p->next == bp) {
+                    p->next = bp->next;
+                    break;
+                }
+                p = p->next;
+            }
+        }
+        free(bp);
+    }
     reply_ok();
 }
 
@@ -732,11 +792,19 @@ void process_packet(char *packet, int packet_size)
     }
     else if (strncmp(packet, "Z1,", 3) == 0)
     {
-        function_add_breakpoint(packet + 3);
+        function_add_hw_breakpoint(packet + 3);
     }
     else if (strncmp(packet, "z1,", 3) == 0)
     {
-        function_remove_breakpoint(packet + 3);
+        function_remove_hw_breakpoint(packet + 3);
+    }
+    else if (strncmp(packet, "Z0,", 3) == 0)
+    {
+        function_add_sw_breakpoint(packet + 3);
+    }
+    else if (strncmp(packet, "z0,", 3) == 0)
+    {
+        function_remove_sw_breakpoint(packet + 3);
     }
     else if (strncmp(packet, "vCont", 5) == 0)
     {
