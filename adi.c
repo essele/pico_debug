@@ -70,8 +70,6 @@ struct memcache {
     uint32_t value;
 };
 
-#define MEM_CACHE_SIZE   4
-
 enum {
     STATE_UNKNOWN,
     STATE_RUNNING,
@@ -95,8 +93,6 @@ struct core {
 
     uint32_t            breakpoints[4];
     struct reg          reg_cache[24];
-    struct memcache     mem_cache[MEM_CACHE_SIZE];
-    int                 mem_cache_pos;
 };
 
 
@@ -105,32 +101,53 @@ struct core cores[2];
 // Core will point at whichever one is current...
 struct core *core = &cores[0];
 
+
 // ----------------------------------------------------------------------------
 // Memory cache helper functions
+//
+// The cache can be invalidated by a single write, for performance, we then take
+// the hit when we add a new item.
+//
+// These functions can be called for all addresses, they will only operate if
+// the addr is in the cacheable range (ROM + FLASGH + RAM)
+//
+// A single memory cache, not one per core since the memory is shared.
 // ----------------------------------------------------------------------------
-
+#define MEM_CACHE_SIZE              4
 #define IS_MEM_CACHEABLE(addr)      (addr < 0x30000000)
 
-int mem_cache_add(uint32_t addr, uint32_t value) {
-    core->mem_cache[core->mem_cache_pos].addr = addr;
-    core->mem_cache[core->mem_cache_pos++].value = value;
-    if (core->mem_cache_pos == MEM_CACHE_SIZE) core->mem_cache_pos = 0;
+static struct memcache     mem_cache[MEM_CACHE_SIZE];
+static int                 mem_cache_pos;
+static int                 mem_cache_valid;
+
+static inline int mem_cache_add(uint32_t addr, uint32_t value) {
+    if (!IS_MEM_CACHEABLE(addr)) return SWD_ERROR;
+    if (!mem_cache_valid) {
+        // We were invalidated, so we need to clear everything
+        for (int i=0; i < MEM_CACHE_SIZE; i++) {
+            mem_cache[i].addr = 0xffffffff;
+        }
+        mem_cache_pos = 0;
+        mem_cache_valid = 1;
+    }
+    mem_cache[mem_cache_pos].addr = addr;
+    mem_cache[mem_cache_pos++].value = value;
+    if (mem_cache_pos == MEM_CACHE_SIZE) mem_cache_pos = 0;
+    return SWD_OK;
 }
-int mem_cache_find(uint32_t addr, uint32_t *res) {
+static inline int mem_cache_find(uint32_t addr, uint32_t *res) {
+    if (!IS_MEM_CACHEABLE(addr)) return SWD_ERROR;
+    if (!mem_cache_valid) return SWD_ERROR;
     for (int i=0; i < MEM_CACHE_SIZE; i++) {
-        if (core->mem_cache[i].addr == addr) {
-            *res = core->mem_cache[i].value;
-            debug_printf("cache hit!\r\n");
+        if (mem_cache[i].addr == addr) {
+            *res = mem_cache[i].value;
             return SWD_OK;
         }
     }
     return SWD_ERROR;
 }
-int mem_cache_clear() {
-    for (int i=0; i < MEM_CACHE_SIZE; i++) {
-        core->mem_cache[i].addr = 0xffffffff;
-    }
-    core->mem_cache_pos = 0;
+static inline void mem_cache_invalidate() {
+    mem_cache_valid = 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -207,47 +224,6 @@ int dp_write(uint32_t addr, uint32_t value) {
     return swd_write(0, addr & 0xf, value);
 }
 
-
-
-int core_select(int num) {
-    uint32_t dpidr = 0;
-    uint32_t dlpidr = 0;
-    uint32_t targetid;
-
-    debug_printf("asked to select core %d\r\n", num);
-    
-    // See if we are already selected...
-    if (core == &cores[num]) return SWD_OK;
-
-    debug_printf("actually selecting core %d\r\n", num);
-
-    CHECK_OK(dp_core_select(num));
-    
-    // Need to switch the core here for dp_read to work...
-    core = &cores[num];
-
-    // The core_select above will have set some of the SELECT bits to zero
-    core->dp_select_cache &= 0xfffffff0;
-
-    // If that was ok we can validate the switch by checking the TINSTANCE part of
-    // DLPIDR
-    CHECK_OK(dp_read(DP_DLPIDR, &dlpidr));
-    
-XX -- need to fix this code here -- 
-
-    // TODO: this doesn't work
-    debug_printf("HAVE DPIDR=%08x DLPIDR=%08x\r\n", dpidr, dlpidr);
-
-    if ((dlpidr & 0xf0000000) != (targetid & 0xf0000000)) return SWD_ERROR;
-
-    debug_printf("core %d selected ok\r\n", num);
-
-    return SWD_OK;
-}
-
-int core_get() {
-    return (core == &cores[0]) ? 0 : 1;
-}
 
 
 
@@ -367,13 +343,13 @@ static inline int ap_mem_set_csw(uint32_t value) {
 
 int mem_read32(uint32_t addr, uint32_t *res) {
     // We implement a 4 word cache....    
-    if (IS_MEM_CACHEABLE(addr) && mem_cache_find(addr, res) == SWD_OK) return SWD_OK;
+    if (mem_cache_find(addr, res) == SWD_OK) return SWD_OK;
 
     CHECK_OK(ap_mem_set_csw(AP_MEM_CSW_SINGLE | AP_MEM_CSW_32));
     CHECK_OK(ap_write(0, AP_MEM_TAR, addr));
     CHECK_OK(ap_read(0, AP_MEM_DRW, res));
 
-    if (IS_MEM_CACHEABLE(addr)) mem_cache_add(addr, *res);
+    mem_cache_add(addr, *res);
     return SWD_OK;
 }
 
@@ -580,7 +556,7 @@ int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
     uint32_t v32;
 
     // If we have an unaligned starting point then let's read a full word
-    // and return the relevant bits so we don't do mulitple reads of the
+    // and keep the relevant bits so we don't do mulitple reads of the
     // same word.
     if (addr & 3) {
         CHECK_OK(mem_read32(addr & 0xffffffffc, &v32));
@@ -592,7 +568,8 @@ int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
         }
     }
 
-    // If we are just one aligned read...
+    // If we are just one aligned read... the use mem_read32 so we get the
+    // benefit of the cache.
     if ((count & 0xfffffffc) == 4) {
         CHECK_OK(mem_read32(addr, &v32));
         *dest++ = (v32 & 0xff);
@@ -764,7 +741,7 @@ int core_halt() {
     uint32_t value;
 
     reg_flush_cache();
-    mem_cache_clear();
+    mem_cache_invalidate();
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (1<<1) | 1);
 //    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<1) | 1);
@@ -781,7 +758,7 @@ int core_unhalt() {
     int rc;
     
     reg_flush_cache();
-    mem_cache_clear();
+    mem_cache_invalidate();
 
 //    rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1 <<3) | (0<<1) | 1);
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (0<<1) | 1);
@@ -795,7 +772,7 @@ int core_unhalt_with_masked_ints() {
     int rc;
 
     reg_flush_cache();
-    mem_cache_clear();
+    mem_cache_invalidate();
 
     rc = mem_write32(DCB_DHCSR, (0xA05F << 16) | (1<<3) | (0<<1) | 1);
     if (rc != SWD_OK) return rc;
@@ -812,7 +789,7 @@ int core_step() {
     if (rc != SWD_OK) return rc;
 
     reg_flush_cache();
-    mem_cache_clear();
+    mem_cache_invalidate();
 
     core->state = STATE_RUNNING;
     return SWD_OK;
@@ -877,50 +854,6 @@ int core_update_status() {
     return SWD_OK;
 }
 
-// If one core stops we need to stop the other one....
-// we return the one that stopped (or -1 if neither did)
-int check_cores() {
-    int cur = core_get();
-    int other = 1-cur;
-    int old_state = core->state;
-    int to_halt = -1;
-    int rc = -1;
-
-    // The first phase is just gathering some info...
-    core_update_status();
-    if ((core->state == STATE_HALTED) && core->state != old_state) {
-        // We must have stopped... so we should stop the other one
-        debug_printf("looks like core %d has halted\r\n", cur);
-        to_halt = other;
-        rc = cur;
-    }
-    core_select(other);
-    old_state = core->state;
-    core_update_status();
-    if ((core->state == STATE_HALTED) && core->state != old_state) {
-        debug_printf("looks like core %d has halted\r\n", other);
-        to_halt = cur;
-        rc = other;
-    }
-
-    // At this point we have other selected, so we can halt it if needed...
-    if (to_halt == other) {
-        if (core->state != STATE_HALTED) {
-            debug_printf("Halting core: %d\r\n", other);
-            core_halt();
-        }
-    }
-
-    // Go back to the orginal one and see if we needed to stop that...
-    core_select(cur);
-    if (to_halt == cur) {
-        if (core->state != STATE_HALTED) {
-            debug_printf("Halting core: %d\r\n", cur);
-            core_halt();
-        }
-    }
-    return rc;
-}
 
 
 /**
@@ -933,7 +866,7 @@ int core_reset_halt() {
     uint32_t value;
 
     reg_flush_cache();
-    mem_cache_clear();
+    mem_cache_invalidate();
 
     // First halt the core...
     core_halt();
@@ -1083,28 +1016,6 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
 }
 
 
- __attribute__((noinline, section("mysec"))) int remote_func (int x) {
-    return x + 2;
-}
-
-int swd_test() {
-    extern char __start_mysec[];
-    extern char __stop_mysec[];
-
-    int length = (__stop_mysec - __start_mysec);
-    int rc;
-
-    rc = mem_write_block(0x20001000, length, (uint8_t *)__start_mysec);
-    if (rc != SWD_OK) panic("fail");
-
-    uint32_t args[1] = { 0x00100020 };
-
-    rc = rp2040_call_function(0x20001000, args, 1);
-    if (rc != SWD_OK) panic("fail");
-    return 0;
-}
-
-
 
 /**
  * @brief Use the rescue dp to perform a hardware reset
@@ -1144,14 +1055,12 @@ int dp_rescue_reset() {
 }
 
 /**
- * @brief Does the basic core select and then reads CTRL/STAT to make sure
- *        everything is working ok.
+ * @brief Does the basic core select and then reads DP_DPIDR as required
  * 
  * @param num 
  * @return int 
  */
 int dp_core_select(int num) {
-    int rc;
     uint32_t rv;
 
     swd_line_reset();
@@ -1159,10 +1068,25 @@ int dp_core_select(int num) {
 
     CHECK_OK(swd_read(0, DP_DPIDR, &rv));
     debug_printf("dp_core_select(%d) dpidr = 0x%08x\r\n", num, rv);
+    return SWD_OK;
+}
+
+/**
+ * @brief Select the core, but also make sure we can properly read
+ *        from it. Used in the initialisation routine.
+ * 
+ * @param num 
+ * @return int 
+ */
+int dp_core_select_and_confirm(int num) {
+    int rc;
+    uint32_t rv;
+
+    CHECK_OK(dp_core_select(num));
     CHECK_OK(swd_write(0, DP_ABORT, ALLERRCLR));
     CHECK_OK(swd_write(0, DP_SELECT, 0));
     CHECK_OK(swd_read(0, DP_CTRL_STAT, &rv));
-    debug_printf("dp_core_select(%d) ctrl/stat = 0x%08x\r\n", num, rv);
+    debug_printf("dp_core_confirm(%d) ctrl/stat = 0x%08x\r\n", num, rv);
     return SWD_OK;
 }
 
@@ -1213,6 +1137,7 @@ int dp_initialise() {
             cores[i].reg_cache[j].valid = 0;
         }
     }
+    mem_cache_invalidate();
     core = NULL;
 
 
@@ -1223,8 +1148,8 @@ int dp_initialise() {
     // Now try to connect to each core and setup power and debug status...
     for (int c = 0; c < 2; c++) {
         while (1) {
-            if (dp_core_select(c) != SWD_OK) {
-                if (dp_core_select(c) != SWD_OK) {
+            if (dp_core_select_and_confirm(c) != SWD_OK) {
+                if (dp_core_select_and_confirm(c) != SWD_OK) {
                     if (have_reset) {
                         panic("unable to talk to cores\r\n");
                     }
@@ -1236,6 +1161,7 @@ int dp_initialise() {
             }
             // Make sure we can use dp_xxx calls...
             core = &cores[c];
+            core->dp_select_cache = 0;
             if (dp_power_on() != SWD_OK) continue;
 
             // Now we can enable debugging...
@@ -1258,7 +1184,93 @@ int dp_initialise() {
     return SWD_OK;
 }
 
+int core_get() {
+    return (core == &cores[0]) ? 0 : 1;
+}
 
+int core_select(int num) {
+    uint32_t dpidr = 0;
+    uint32_t dlpidr = 0;
+    uint32_t targetid;
+
+    debug_printf("asked to select core %d\r\n", num);
+    
+    // See if we are already selected...
+    if (core == &cores[num]) return SWD_OK;
+
+    debug_printf("actually selecting core %d\r\n", num);
+
+    CHECK_OK(dp_core_select(num));
+    
+    // Need to switch the core here for dp_read to work...
+    core = &cores[num];
+
+    // The core_select above will have set some of the SELECT bits to zero
+    //core->dp_select_cache &= 0xfffffff0;
+
+    // If that was ok we can validate the switch by checking the TINSTANCE part of
+    // DLPIDR
+    CHECK_OK(dp_read(DP_DLPIDR, &dlpidr));
+
+    // TODO: shouldn't we validate DPIDR with DLPIDR?
+    return SWD_OK;
+    
+
+    // TODO: this doesn't work
+    debug_printf("HAVE DPIDR=%08x DLPIDR=%08x\r\n", dpidr, dlpidr);
+
+    if ((dlpidr & 0xf0000000) != (targetid & 0xf0000000)) return SWD_ERROR;
+
+    debug_printf("core %d selected ok\r\n", num);
+
+    return SWD_OK;
+}
+
+
+// If one core stops we need to stop the other one....
+// we return the one that stopped (or -1 if neither did)
+int check_cores() {
+    int cur = core_get();
+    int other = 1-cur;
+    int old_state = core->state;
+    int to_halt = -1;
+    int rc = -1;
+
+    // The first phase is just gathering some info...
+    core_update_status();
+    if ((core->state == STATE_HALTED) && core->state != old_state) {
+        // We must have stopped... so we should stop the other one
+        debug_printf("looks like core %d has halted\r\n", cur);
+        to_halt = other;
+        rc = cur;
+    }
+    core_select(other);
+    old_state = core->state;
+    core_update_status();
+    if ((core->state == STATE_HALTED) && core->state != old_state) {
+        debug_printf("looks like core %d has halted\r\n", other);
+        to_halt = cur;
+        rc = other;
+    }
+
+    // At this point we have other selected, so we can halt it if needed...
+    if (to_halt == other) {
+        if (core->state != STATE_HALTED) {
+            debug_printf("Halting core: %d\r\n", other);
+            core_halt();
+        }
+    }
+
+    // Go back to the orginal one and see if we needed to stop that...
+    core_select(cur);
+    if (to_halt == cur) {
+        if (core->state != STATE_HALTED) {
+            debug_printf("Halting core: %d\r\n", cur);
+            core_halt();
+        }
+    }
+    return rc;
+}
 
 
 

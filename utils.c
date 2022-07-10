@@ -1,5 +1,6 @@
 
 #include "utils.h"
+#include "stdlib.h"
 
 int hex_digit(char ch) {
     if (ch >= '0' && ch <= '9') return (ch - '0');
@@ -39,6 +40,17 @@ uint32_t hex_word_le32(char *packet) {
         rc |= (v << 24);
     }
     return rc;
+}
+
+char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two) {
+    char *sep;
+    char *end;
+
+    *one = strtoul(packet, &sep, 16);
+    if (*sep != sepch)
+        return NULL;
+    *two = strtoul(sep + 1, &end, 16);
+    return end;
 }
 
 

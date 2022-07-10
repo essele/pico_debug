@@ -25,6 +25,7 @@ add_executable(pico-debug
     io.c io.h
 
     gdb.c gdb.h
+    breakpoint.c breakpoint.h
 
     utils.c utils.h
     
@@ -73,7 +74,7 @@ target_compile_definitions(pico-debug PRIVATE
 #  DEBUG_UART_BAUD=115200
 )
 
-target_compile_options(pico-debug INTERFACE
+target_compile_options(pico-debug PUBLIC
   -Wall
 )
 

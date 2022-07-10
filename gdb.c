@@ -11,6 +11,7 @@
 #include "lerp/task.h"
 #include "utils.h"
 #include "flash.h"
+#include "breakpoint.h"
 
 #include "filedata.h"
 
@@ -19,13 +20,30 @@
 static char gdb_buffer[GDB_BUFFER_SIZE + 1];
 static char *gdb_bp;
 static int gdb_blen;
-
 static int gdb_noack = 0;
 
 
 extern int usb_n_printf(int n, char *format, ...);
 #define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
 
+// -------------------------------------------------------------------------------------
+// We look at the gdb packet and use the first letter to work out what to do, where this
+// could be one of many items we use lookup tables to match the first part of the packet
+// to a given function.
+// -------------------------------------------------------------------------------------
+typedef void (*gdbfunc)(char *packet, int packet_size, void *ptr, int num);
+
+struct gdbitem {
+    char        *match;         // string to match
+    int         matchlen;       // how long it that
+    gdbfunc     function;       // what function to call
+    void        *ptr;           // optional pointer argument
+    int         num;            // optional int argument
+};
+
+// NOTE: the tables are after the function sections...
+#define UNUSED              __attribute__ ((unused))
+#define GDBFUNC(name)      void function_##name(UNUSED char *packet, UNUSED int packet_size, UNUSED void *ptr, UNUSED int num)
 
 // --------------------------------------------------------------------------
 // This is a state machine for processing the incoming GDB packet data
@@ -144,60 +162,17 @@ int decode_xfer_read(char *packet, int *offset, int *length) {
 }
 
 
-void function_qSupported()
-{
-    reply_printf("PacketSize=%x;qXfer:memory-map:read+;qXfer:features:read+;"
-                                "qXfer:threads:read+;QStartNoAckMode+;vContSupported+",
-                                        GDB_BUFFER_SIZE);
-}
 
-/**
- * @brief This will be called when we want a part of something
- *
- * @param packet
- * @param len
- */
-void function_xfer_thing(char *packet, char *content, int content_len)
-{
-    int offset;
-    int length;
-    char symbol;
-    char *p;
 
-    if (!decode_xfer_read(packet, &offset, &length)) {
-        reply_err(1);
-        return;
-    }
 
-    p = content + offset;
-    if (offset + length > content_len) {
-        length = content_len - offset;
-        symbol = 'l';
-    } else {
-        symbol = 'm';
-    }
-    reply_part(symbol, p, length);
-}
-
-void function_xfer_threads(char *packet)
-{
-    char *out = malloc(1024);
-    if (!out)
-    {
-        reply_err(1);
-        return;
-    }
-    sprintf(out, "<?xml version=\"1.0\"?>\n<threads>\n"
-                 "<thread id=\"1\">Name: rp2040.core0, state: %s</thread>\n"
-                 "<thread id=\"2\">Name: rp2040.core1, state: %s</thread>\n"
-                 "</threads>\n",
-            "breakpoint", "debug-request");
-    function_xfer_thing(packet, out, strlen(out));
-    free(out);
-}
 
 void function_get_sys_regs() {
-    char buf[18 * 8];
+    static char *buf = NULL;
+
+    if (!buf) {     // one-off malloc the first time (this allows us to potentally be more size flexible)
+        buf = malloc(18 * 8);
+        if (!buf) panic("out of memory");
+    }
     char *p = buf;
 
     for (int i = 0; i <= 16; i++) {
@@ -205,8 +180,7 @@ void function_get_sys_regs() {
         int rc;
 
         rc = reg_read(i, &rval);
-        if (rc != SWD_OK)
-            panic("reg read failed");
+        if (rc != SWD_OK) { reply_err(1); return; }
         sprintf(p, "%02x%02x%02x%02x", (uint8_t)(rval & 0xff), (uint8_t)((rval & 0xff00) >> 8), 
                                                 (uint8_t)((rval & 0xff0000) >> 16), (uint8_t)(rval >> 24));
         p += 8;
@@ -215,15 +189,12 @@ void function_get_sys_regs() {
 }
 
 void function_get_reg(char *packet) {
-    char buf[9];
     uint32_t rval;
     int reg = strtoul(packet, NULL, 16);
     int rc = reg_read(reg, &rval);
-    if (rc != SWD_OK)
-        panic("reg read failed");
-    sprintf(buf, "%02x%02x%02x%02x", (uint8_t)(rval & 0xff), (uint8_t)((rval & 0xff00) >> 8), 
+    if (rc != SWD_OK) { reply_err(1); return; }
+    reply_printf("%02x%02x%02x%02x", (uint8_t)(rval & 0xff), (uint8_t)((rval & 0xff00) >> 8), 
                                             (uint8_t)((rval & 0xff0000) >> 16), (uint8_t)(rval >> 24));
-    reply(buf, NULL, 0);
 }
 
 void function_put_reg(char *packet) {
@@ -246,22 +217,10 @@ void function_put_reg(char *packet) {
     }
 }
 
-char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two) {
-    char *sep;
-    char *end;
-
-    *one = strtoul(packet, &sep, 16);
-    if (*sep != sepch)
-        return NULL;
-    *two = strtoul(sep + 1, &end, 16);
-    return end;
-}
 
 void function_memread(char *packet) {
     uint8_t small_buf[10];
-    char *sep;
-    uint32_t addr;
-    uint32_t len;
+    uint32_t addr, len;
     int rc;
 
     if (!get_two_hex_numbers(packet, ',', &addr, &len)) {
@@ -272,6 +231,7 @@ void function_memread(char *packet) {
     // If we are a small request then use the small buffer...
     if (len <= 4) {
         rc = mem_read_block(addr, len, small_buf);
+        if (rc != SWD_OK) { reply_err(1); return; }
         reply(NULL, small_buf, len);
         return;
     }
@@ -283,6 +243,7 @@ void function_memread(char *packet) {
         return;
     }
     rc = mem_read_block(addr, len, (uint8_t *)buffer);
+    if (rc != SWD_OK) { reply_err(1); return; }
     reply(NULL, (uint8_t *)buffer, len);
     free(buffer);
     return;
@@ -294,44 +255,37 @@ void function_memwrite(char *packet)
     int rc;
     char *p = get_two_hex_numbers(packet, ',', &addr, &length);
 
-    if (!p || *p != ':' || !length)
-    {
+    if (!p || *p != ':' || !length) {
         reply_null();
         return;
     }
     packet = p + 1;
 
-    // Allocate enough space to process our incoming buffer...
-    uint8_t *buf = malloc(length);
-    if (!buf)
-        panic("mem");
-
-    uint8_t *bp = buf;
+    // Process the hex into our gdb_buffer so we don't have to malloc
+    // (we're well before the hex so will fit fine)
+    uint8_t *bp = (uint8_t *)gdb_buffer;
     // Now process our data...
-    for (int i = 0; i < length; i++)
-    {
+    for (int i = 0; i < length; i++) {
         *bp++ = hex_byte(packet);
         packet += 2;
     }
 
     // And now write it...
-    rc = mem_write_block(addr, length, buf);
-    free(buf);
-    if (rc != SWD_OK)
-    {
-        debug_printf("mem write failed\r\n");
-        reply_null();
-        return;
-    }
+    rc = mem_write_block(addr, length, (uint8_t *)gdb_buffer);
+    if (rc != SWD_OK) { reply_err(1); return; }
     reply_ok();
 }
 
 void send_stop_packet(int thread, int reason) {
-    char buf[16];
-
-    sprintf(buf, "T%02dthread:%d;", reason, thread);
-    reply(buf, NULL, 0);
+    reply_printf("T%02dthread:%d;", reason, thread);
 }
+
+
+// -----------------------------------------------------------------------------------------------
+// "v"" Related Packets (v)
+// -----------------------------------------------------------------------------------------------
+
+
 
 // New vCont thinking ...
 //
@@ -344,15 +298,13 @@ void send_stop_packet(int thread, int reason) {
 
 
 
-void function_vcont(char *packet)
-{
+GDBFUNC(vCont) {
     enum { CORE_STEP=0, CORE_RUN };
     int cur = core_get();
     int other = 1 - cur;
     int action[2];
 
-    if (*packet == '?')
-    {
+    if (*packet == '?') {
         static const char vcont[] = "vCont;c;C;s;S";
         reply((char *)vcont, NULL, 0);
         return;
@@ -418,93 +370,8 @@ void function_vcont(char *packet)
     }
 }
 
-static char hex_digits[] = "0123456789abcdef";
 
-void function_rcmd(char *packet, int len)
-{
-    char *p = packet;
-
-    // Must be an even number of chars...
-    if (len & 1)
-        goto error;
-    len >>= 1;
-
-    // Decode the hex in place (so we don't need more buffers)
-    for (int i = 0; i < len; i++)
-    {
-        int v;
-        char *x = index(hex_digits, tolower(*p++));
-        if (!x)
-            goto error;
-        v = ((int)(x - hex_digits)) << 4;
-        x = index(hex_digits, tolower(*p++));
-        if (!x)
-            goto error;
-        v |= ((int)(x - hex_digits));
-        packet[i] = v;
-    }
-    debug_printf("HAVE RCMD [%.*s]\r\n", len, packet);
-
-    if (strncmp(packet, "reset halt", 10) == 0)
-    {
-        core_reset_halt();
-        reply_ok();
-        return;
-    }
-    reply_err(1);
-    return;
-
-error:
-    reply_err(1);
-}
-
-void function_XX()
-{
-    uint32_t addr;
-    int rc;
-
-    addr = rp2040_find_rom_func('I', 'F'); // connect_internal_flash
-    if (!addr)
-    {
-        debug_printf("unable to lookup IF\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute IF failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('F', 'C'); // flush cache
-    if (!addr)
-    {
-        debug_printf("unable to lookup FC\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute FC failed\r\b");
-        return;
-    }
-
-    addr = rp2040_find_rom_func('C', 'X'); // enter_cmd_xip
-    if (!addr)
-    {
-        debug_printf("unable to lookup CX\r\n");
-        return;
-    }
-    rc = rp2040_call_function(addr, NULL, 0);
-    if (rc != SWD_OK)
-    {
-        debug_printf("execute CX failed\r\b");
-        return;
-    }
-    reply_ok();
-}
-
-void function_vflash_erase(char *packet)
+void XXfunction_vflash_erase(char *packet)
 {
     uint32_t start, length;
     char *p = get_two_hex_numbers(packet, ',', &start, &length);
@@ -518,20 +385,13 @@ void function_vflash_erase(char *packet)
     return;
 }
 
-// The write process will just write the data to the memory as a bit of a hack...
-// the done will actually process it...
-uint32_t Xvflash_ram = 0x20000000;
-uint32_t Xvflash_start = 0x10000000;
-uint32_t Xvflash_len = 0;
-
-void function_vflash_write(char *packet, int len)
-{
+GDBFUNC(vFlashWrite) {
     uint32_t start;
+    int len = packet_size;
 
     char *sep;
     start = strtoul(packet, &sep, 16);
-    if (*sep != ':')
-    {
+    if (*sep != ':') {
         debug_printf("expecting colon\r\n");
         return;
     }
@@ -555,292 +415,257 @@ void function_vflash_write(char *packet, int len)
     free(p);
 
     reply_ok();
-    return;
 }
 
-void function_vflash_done() {
+GDBFUNC(vFlashDone) {
     // Flush anything left...
     rp2040_add_flash_bit(0xffffffff, NULL, 0);
-
-    reply_ok();
-    return;
-}
-
-void function_add_hw_breakpoint(char *packet) {
-    uint32_t addr, size;
-    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
-        debug_printf("bp set syntax\r\n");
-        return;
-    }
-    bp_set(addr);
-    reply_ok();
-}
-void function_remove_hw_breakpoint(char *packet) {
-    uint32_t addr, size;
-    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
-        debug_printf("bp clr syntax\r\n");
-        return;
-    }
-    bp_clr(addr);
     reply_ok();
 }
 
-struct swbp {
-    struct swbp *next;
-    uint32_t    addr;
-    int         size;
-    uint32_t    orig;
+GDBFUNC(null)   { reply_null(); }
+GDBFUNC(ok)     { reply_ok(); }
+
+static const struct gdbitem gdb_v_items[] = {
+    { "vMustReplyEmpty", 15, function_null, NULL, 0 },
+    { "vCont", 5, function_vCont, NULL, 0 },
+    { "vFlashErase:", 12, function_ok, NULL, 0 },
+    { "vFlashWrite:", 12, function_vFlashWrite, NULL, 0 },
+    { "vFlashDone", 10, function_vFlashDone, NULL, 0 },
+    { NULL, 0, NULL, NULL, 0 },
 };
-struct swbp *sw_breakpoints = NULL;
 
-struct swbp *find_swbp(uint32_t addr) {
-    struct swbp *p = sw_breakpoints;
-    while (p) {
-        if (p->addr == addr) return p;
-    }
-    return NULL;
-}
-
-void function_add_sw_breakpoint(char *packet) {
-    uint32_t addr, size;
-    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
-        debug_printf("sw bp set syntax\r\n");
-        return;
-    }
-    if (!find_swbp(addr)) {
-        struct swbp *bp = malloc(sizeof(struct swbp));
-        bp->addr = addr;
-        bp->size = size;
-        mem_read_block(addr, size, (uint8_t *)&bp->orig);
-        uint32_t code = 0xbe11be11;
-        mem_write_block(addr, size, (uint8_t *)&code);
-        bp->next = sw_breakpoints;
-        sw_breakpoints = bp;
-    }
-    reply_ok();
-}
-void function_remove_sw_breakpoint(char *packet) {
-    uint32_t addr, size;
-    if (!get_two_hex_numbers(packet, ',', &addr, &size)) {
-        debug_printf("sw bp clr syntax\r\n");
-        return;
-    }
-    struct swbp *bp = find_swbp(addr);
-    if (bp) {
-        mem_write_block(bp->addr, bp->size, (uint8_t *)&bp->orig);
-        if (sw_breakpoints == bp) {
-            sw_breakpoints = bp->next;
-        } else {
-            struct swbp *p = sw_breakpoints;
-            while (p) {
-                if (p->next == bp) {
-                    p->next = bp->next;
-                    break;
-                }
-                p = p->next;
-            }
-        }
-        free(bp);
-    }
-    reply_ok();
-}
+// -----------------------------------------------------------------------------------------------
+// Thread Related Packets (q)
+// -----------------------------------------------------------------------------------------------
 
 int get_threadid(char *packet) {
-    return strtol(packet, NULL, 10);
+    return strtol(packet, NULL, 16); 
+}
+int thread_to_core(int thread) {
+    return thread-1;
 }
 
-void function_thread(char *packet, int packet_size) {
-    int tid;
+void function_thread_valid(char *packet, int packet_size) {
+    int tid = get_threadid(packet);
+    if (tid == 1 || tid == 2) reply_ok();
+    reply_err(1);
+}
 
-    if (*packet == 'T') {
-        // Check for thread existance...
-        packet++;
-        tid = get_threadid(packet);
-        if (tid == 1 || tid == 2) {
-            reply_ok();
-        } else {
-            reply_err(1);
-        }        
-    } else if (*packet == 'H') {
-        int num;
-        int rc;
-        packet++;
+GDBFUNC(Hc) {       // This is really deprecated (replaced by vCont) so just reply ok.
+    reply_ok();
+}
+GDBFUNC(Hg) {       // Actually do a core switch
+    int rc;
+    int tid = get_threadid(packet);
+    if (tid == 0) tid = 1;
+    if ((tid < 1) || (tid > 2)) { reply_err(1); return; }
+    rc = core_select(thread_to_core(tid));
+    if (rc != SWD_OK) { reply_err(1); return; }
+    reply_ok();
+}
 
-        if (*packet == 'c') {
-            // Continue....
-            tid = get_threadid(packet+1);
-            reply_ok();
-            return;
-        }
-        if (*packet == 'g') { 
-            tid = get_threadid(packet+1);
-            if (tid == 0 || tid == 1) {
-                num = 0;
-            } else if (tid == 2) {
-                num = 1;
-            } else {
-                reply_err(1);
-                return;
-            }
-            rc = core_select(num);
-            if (rc != SWD_OK) {
-                debug_printf("CORE SELECT FAILED\r\n");
-                reply_err(1);
-            } else {
-                reply_ok();
-            }
-            return;
-        }
+static const struct gdbitem gdb_H_items[] = {
+    { "Hg", 2, function_Hg, NULL, 0 },
+    { "Hc", 2, function_Hc, NULL, 0 },
+    { NULL, 0, NULL, NULL, 0 },
+};
+
+// -----------------------------------------------------------------------------------------------
+// General Query Packets (q)
+// -----------------------------------------------------------------------------------------------
+
+typedef char *(*xfer_func)(int *len);
+
+char *xfer_features(int *len) {
+    *len = sizeof(rp2040_features_xml);
+    return (char *)rp2040_features_xml;
+}
+char *xfer_memory_map(int *len) {
+    *len = sizeof(rp2040_memory_map_xml);
+    return (char *)rp2040_memory_map_xml;
+}
+char *xfer_threads(int *len) {
+    static char *out = NULL;
+    
+    if (!out) out = malloc(1024);       // TODO: fix this
+    if (!out) panic("no memory");
+    *len = sprintf(out, "<?xml version=\"1.0\"?>\n<threads>\n"
+                 "<thread id=\"1\">Name: rp2040.core0, state: %s</thread>\n"
+                 "<thread id=\"2\">Name: rp2040.core1, state: %s</thread>\n"
+                 "</threads>\n",
+            "breakpoint", "debug-request");
+    return out;
+}
+
+GDBFUNC(qC) { reply_printf("QC%08x", core_get() + 1); }
+GDBFUNC(qAttached) { reply("1", NULL, 0); }
+GDBFUNC(qSupported) {
+    reply_printf("PacketSize=%x;qXfer:memory-map:read+;qXfer:features:read+;"
+                                "qXfer:threads:read+;QStartNoAckMode+;vContSupported+",
+                                        GDB_BUFFER_SIZE);
+}
+GDBFUNC(qOffsets) { reply("Text=0;Data=0;Bss=0", NULL, 0); }
+GDBFUNC(qSymbol) {
+    reply_ok();
+}
+GDBFUNC(qXfer) {
+    xfer_func   func = (xfer_func)ptr;
+    int         content_len;
+
+    // Func will build/return the content...
+    char        *content = func(&content_len);
+
+    // Now process the packet to see what bit we want...
+    int offset;
+    int length;
+    char symbol;
+    char *p;
+
+    if (!decode_xfer_read(packet, &offset, &length)) {
         reply_err(1);
+        return;
     }
+
+    p = content + offset;
+    if (offset + length > content_len) {
+        length = content_len - offset;
+        symbol = 'l';
+    } else {
+        symbol = 'm';
+    }
+    reply_part(symbol, p, length);
 }
+GDBFUNC(qRcmd) {
+    char *p = packet;
+    int len = packet_size;
+
+    // Must be an even number of chars...
+    if (len & 1) goto error;
+    len >>= 1;
+
+    // Decode the hex in place (so we don't need more buffers)
+    for (int i = 0; i < len; i++)
+    {
+        int b = hex_byte(p);
+        if (b < 0) goto error;
+        p += 2;
+        packet[i] = b;
+    }
+    debug_printf("HAVE RCMD [%.*s]\r\n", len, packet);
+
+    if (strncmp(packet, "reset halt", 10) == 0) {
+        core_reset_halt();
+        reply_ok();
+        return;
+    }
+error:
+    reply_err(1);
+}
+
+
+struct gdbitem gdb_q_items[] = {
+    { "qC", 2, function_qC, NULL, 0 },
+    { "qAttached", 9, function_qAttached, NULL, 0 },
+    { "qSupported", 10, function_qSupported, NULL, 0 },
+    { "qOffsets", 10, function_qOffsets, NULL, 0 },
+    { "qRcmd,", 6, function_qRcmd, NULL, 0 },
+    { "qSymbol", 7, function_qSymbol, NULL, 0 },
+    { "qXfer:features:read:", 20, function_qXfer, (void *)xfer_features, 0 },
+    { "qXfer:memory-map:read:", 22, function_qXfer, (void *)xfer_memory_map, 0 },
+    { "qXfer:threads:read:", 19, function_qXfer, (void *)xfer_threads, 0 },
+    { NULL, 0, NULL, NULL, 0 },
+};
+
+// -----------------------------------------------------------------------------------------------
+// Breakpoint Related Packets (z/Z)
+// -----------------------------------------------------------------------------------------------
+
+GDBFUNC(z_hw) {
+    int add = num;
+    uint32_t addr, size;
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) { reply_err(1); return; }
+    if (add) {
+        if (bp_set(addr) != SWD_OK) reply_err(1);
+    } else {
+        if (bp_clr(addr) != SWD_OK) reply_err(1);
+    }
+    reply_ok();
+}
+GDBFUNC(z_sw) {
+    int add = num;
+    uint32_t addr, size;
+    if (!get_two_hex_numbers(packet, ',', &addr, &size)) { reply_err(1); return; }
+    if (add) {
+        if (sw_bp_set(addr, size) != SWD_OK) reply_err(1);
+    } else {
+        if (sw_bp_clr(addr, size) != SWD_OK) reply_err(1);
+    }
+    reply_ok();
+}
+
+static const struct gdbitem gdb_z_items[] = {
+    { "z0,", 3, function_z_sw, NULL, 0 },
+    { "Z0,", 3, function_z_sw, NULL, 1 },
+    { "z1,", 3, function_z_hw, NULL, 0 },
+    { "Z1,", 3, function_z_hw, NULL, 1 },
+    { NULL, 0, NULL, NULL, 0 },
+};
+
+
+
+
+void process_table(const struct gdbitem *table, char *packet, int packet_size) {
+    struct gdbitem *f = (struct gdbitem *)table;
+
+    while (f->match) {
+        if (strncmp(packet, f->match, f->matchlen) == 0) {
+            f->function(packet + f->matchlen, packet_size - f->matchlen, f->ptr, f->num);
+            return;
+        }
+        f++;
+    }
+    reply_null();
+}
+
+
 
 void process_packet(char *packet, int packet_size)
 {
     // TODO: checksum
     if (!gdb_noack) io_put_byte('+');
 
-    if (strncmp(packet, "vFlashWrite", 11) == 0)
-    {
+    if (strncmp(packet, "vFlashWrite", 11) == 0) {
         debug_printf("FLASH WRITE PACKET\r\n");
-    }
-    else
-    {
+    } else {
         debug_printf("PKT [%.*s]\r\n", packet_size, packet);
     }
 
-    if (strncmp(packet, "qSupported:", 11) == 0)
-    {
-        function_qSupported();
+    switch(*packet) {
+        case 'm':   function_memread(packet+1); return;
+        case 'M':   function_memwrite(packet+1); return;
+        case 'p':   function_get_reg(packet+1); return;
+        case 'P':   function_put_reg(packet+1); return;
+        case 'g':   function_get_sys_regs(); return;
+        case 'T':   function_thread_valid(packet+1, packet_size-1); return;
+        case 'H':   process_table(gdb_H_items, packet, packet_size); return;
+        case 'q':   process_table(gdb_q_items, packet, packet_size); return;
+        case 'z':   process_table(gdb_z_items, packet, packet_size); return;
+        case 'Z':   process_table(gdb_z_items, packet, packet_size); return;
+        case 'v':   process_table(gdb_v_items, packet, packet_size); return;
+        case '?':   reply("S00", NULL, 0); return;  // TODO
     }
-    else if (strncmp(packet, "QStartNoAckMode", 15) == 0)
-    {
+
+    // the odd strange case left...
+    if (strncmp(packet, "QStartNoAckMode", 15) == 0) {
         reply_ok();
         gdb_noack = 1;
-    }
-    else if (strncmp(packet, "vMustReplyEmpty", 15) == 0)
-    {
-        reply_null();
-    }
-    else if (strncmp(packet, "qXfer:features:read:", 20) == 0)
-    {
-        function_xfer_thing(packet + 20, (char *)rp2040_features_xml, sizeof(rp2040_features_xml));
-    }
-    else if (strncmp(packet, "qXfer:memory-map:read:", 22) == 0)
-    {
-        function_xfer_thing(packet + 22, (char *)rp2040_memory_map_xml, sizeof(rp2040_memory_map_xml));
-    }
-    else if (strncmp(packet, "qXfer:threads:read:", 19) == 0)
-    {
-        // function_xfer_thing(packet+19, (char *)rp2040_threads_xml, sizeof(rp2040_threads_xml));
-        function_xfer_threads(packet + 19);
-    }
-    else if (strncmp(packet, "qAttached", 9) == 0)
-    {
-        reply("1", NULL, 0);
-    }
-    else if (strncmp(packet, "qSymbol::", 9) == 0)
-    {
-        reply_ok();
-    }
-    else if (strncmp(packet, "?", 1) == 0)
-    {
-        // TODO:!!!!!
-        reply("S00", NULL, 0);
-    }
-    else if (strncmp(packet, "H", 1) == 0)
-    {
-        // This is thread stuff...
-        function_thread(packet, packet_size);
-    }
-    else if (strncmp(packet, "qC", 2) == 0)
-    {
-        // RTOS thread?
-        if (core_get() == 0) {
-            reply("QC0000000000000001", NULL, 0);
-        } else {
-            reply("QC0000000000000002", NULL, 0);
-        }
-    }
-    else if (strncmp(packet, "qOffsets", 8) == 0)
-    {
-        static const char offsets[] = "Text=0;Data=0;Bss=0";
-        reply((char *)offsets, NULL, 0);
-    }
-    else if (strncmp(packet, "g", 1) == 0)
-    {
-        // Get all registers...
-        function_get_sys_regs();
-    }
-    else if (strncmp(packet, "m", 1) == 0)
-    {
-        function_memread(packet + 1);
-    }
-    else if (strncmp(packet, "M", 1) == 0)
-    {
-        function_memwrite(packet + 1);
-    }
-    else if (strncmp(packet, "p", 1) == 0)
-    {
-        // Read single register...
-        function_get_reg(packet + 1);
-    }
-    else if (strncmp(packet, "P", 1) == 0)
-    {
-        // Write single reg...
-        function_put_reg(packet + 1);
-    }
-    else if (strncmp(packet, "Z1,", 3) == 0)
-    {
-        function_add_hw_breakpoint(packet + 3);
-    }
-    else if (strncmp(packet, "z1,", 3) == 0)
-    {
-        function_remove_hw_breakpoint(packet + 3);
-    }
-    else if (strncmp(packet, "Z0,", 3) == 0)
-    {
-        function_add_sw_breakpoint(packet + 3);
-    }
-    else if (strncmp(packet, "z0,", 3) == 0)
-    {
-        function_remove_sw_breakpoint(packet + 3);
-    }
-    else if (strncmp(packet, "vCont", 5) == 0)
-    {
-        function_vcont(packet + 5);
-    }
-    else if (strncmp(packet, "qRcmd,", 6) == 0)
-    {
-        function_rcmd(packet + 6, packet_size - 6);
-    }
-    else if (strncmp(packet, "vFlashErase:", 12) == 0)
-    {
-        function_vflash_erase(packet + 12);
-    }
-    else if (strncmp(packet, "vFlashWrite:", 12) == 0)
-    {
-        function_vflash_write(packet + 12, packet_size - 12);
-    }
-    else if (strncmp(packet, "vFlashDone", 10) == 0)
-    {
-        function_vflash_done();
-    }
-    else if (strncmp(packet, "T", 1) == 0) {
-        function_thread(packet, packet_size);
-    }
-    else
-    {
-        // Not supported...
-        reply_null();
+        return;
     }
 
-    // Really need to copy buffer along if there's any left
-
-    gdb_bp = gdb_buffer;
-    gdb_blen = 0;
+    // Else not supported...
+    reply_null();
 }
-
 
 
 int gdb_poll() {
