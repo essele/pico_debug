@@ -115,7 +115,7 @@ static void send_to_usb() {
 }
 
 int io_put_hexbyte(uint8_t b) {
-    static const char hexdigits[] = "0123456789ABCDEF";
+    static const char hexdigits[] = "0123456789abcdef";
     uint8_t sum = 0;
     uint8_t ch;
     

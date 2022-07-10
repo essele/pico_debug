@@ -831,7 +831,7 @@ int core_is_halted() {
         panic("HERE");
     }
     if (rc != SWD_OK) return -1;
-    if (value & 0x00020000) return 1;
+    if (value & (1<<17)) return 1;
     return 0;
 }
 

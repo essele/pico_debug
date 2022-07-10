@@ -402,6 +402,8 @@ GDBFUNC(vFlashWrite) {
     len -= delta;
     debug_printf("writing %d bytes to flash at 0x%08x\r\n", len, start);
 
+    // TODO: look at whether we really need to do this ... does it actually make a
+    // difference ... if it does, then maybe a memmove back a few bytes will be better.
 
     // Make sure our source data is word aligned...
     char *p = malloc(len);
@@ -506,7 +508,28 @@ GDBFUNC(qSupported) {
                                         GDB_BUFFER_SIZE);
 }
 GDBFUNC(qOffsets) { reply("Text=0;Data=0;Bss=0", NULL, 0); }
+
+// TODO: this is a temporary hack to support run_to_main
+static uint32_t symbol_main = 0;
+
 GDBFUNC(qSymbol) {
+    // This is GDB either telling us it's prepared to serve symbols or a response to a previous
+    // reuqest. Format is qSymbol:: or qSymbol:hex_value:hex_name
+    if (*packet == ':' && packet_size == 1) {
+        // Initial qSymbol:: notification ... we want the value of main
+        reply("qSymbol:", (uint8_t *)"main", 4);
+        return;
+    }
+    if (*packet == ':') {
+        // We didn't get a value
+        reply_ok();
+        return;
+    }
+    // This is a response... we'll assume it's for what we asked...
+    uint32_t value = strtoul(packet, NULL, 16);
+    symbol_main = value;
+    debug_printf("HAVE VALUE: 0x%08x\r\n", value);
+
     reply_ok();
 }
 GDBFUNC(qXfer) {
@@ -517,8 +540,7 @@ GDBFUNC(qXfer) {
     char        *content = func(&content_len);
 
     // Now process the packet to see what bit we want...
-    int offset;
-    int length;
+    int offset, length;
     char symbol;
     char *p;
 
@@ -558,6 +580,16 @@ GDBFUNC(qRcmd) {
         core_reset_halt();
         reply_ok();
         return;
+    } else if (strncmp(packet, "get_to_main", 11) == 0) {
+        // TODO: check if we fail to add the breakpoint
+        bp_set(symbol_main);
+        core_unhalt();
+        while(!core_is_halted()) {
+            // TODO: this could block, so we probably want a timeout
+        }
+        bp_clr(symbol_main);
+        reply_ok();
+        return;
     }
 error:
     reply_err(1);
@@ -570,7 +602,7 @@ struct gdbitem gdb_q_items[] = {
     { "qSupported", 10, function_qSupported, NULL, 0 },
     { "qOffsets", 10, function_qOffsets, NULL, 0 },
     { "qRcmd,", 6, function_qRcmd, NULL, 0 },
-    { "qSymbol", 7, function_qSymbol, NULL, 0 },
+    { "qSymbol:", 8, function_qSymbol, NULL, 0 },
     { "qXfer:features:read:", 20, function_qXfer, (void *)xfer_features, 0 },
     { "qXfer:memory-map:read:", 22, function_qXfer, (void *)xfer_memory_map, 0 },
     { "qXfer:threads:read:", 19, function_qXfer, (void *)xfer_threads, 0 },

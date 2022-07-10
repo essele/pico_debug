@@ -53,4 +53,24 @@ char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two
     return end;
 }
 
+/**
+ * @brief Convert a sequence of hex bytes into binary form in the same place, returning length
+ * 
+ * @param packet 
+ * @param sep 
+ * @return int 
+ */
+int hex_to_bin(char *packet) {
+    int v;
+    uint8_t *dst = packet;
+    int len = 0;
+
+    while((v = hex_byte(packet)) >= 0) {
+        *dst++ = v;
+        packet += 2;
+        len++;
+    }
+    return len;
+}
+
 

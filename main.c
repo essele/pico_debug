@@ -85,6 +85,12 @@ void main_poll() {
     swd_pio_poll();
 }
 
+//
+// PreAttach Commands are run before the reset halt and the flashing and teh following reset halt
+// PostAttach Commands are run after the above
+//
+
+
 
 int main() {
     // Take us to 150Mhz (for future rmii support)
