@@ -22,6 +22,7 @@ Still to do:
 - Proper handling of maskints for halt/step/continue
 - UART support (spare cdc ready, just not implemented yet)
 - Parallel flashing test - i.e. transfer & flash at the same time
+- Mechanism to change the speed (currently fixed at 25MHz)
 - Lots of code tidy up ... genericising where possible.
 - LOTS 
 
