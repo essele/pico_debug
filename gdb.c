@@ -13,6 +13,8 @@
 #include "flash.h"
 #include "breakpoint.h"
 
+#include "lerp/debug.h"
+
 #include "filedata.h"
 
 #define GDB_BUFFER_SIZE 16384
@@ -21,10 +23,8 @@ static char gdb_buffer[GDB_BUFFER_SIZE + 1];
 static char *gdb_bp;
 static int gdb_blen;
 static int gdb_noack = 0;
+static int gdb_intr = 0;        // have we received an interrupt?
 
-
-extern int usb_n_printf(int n, char *format, ...);
-#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
 
 // -------------------------------------------------------------------------------------
 // We look at the gdb packet and use the first letter to work out what to do, where this
@@ -171,7 +171,7 @@ void function_get_sys_regs() {
 
     if (!buf) {     // one-off malloc the first time (this allows us to potentally be more size flexible)
         buf = malloc(18 * 8);
-        if (!buf) panic("out of memory");
+        if (!buf) lerp_panic("out of memory");
     }
     char *p = buf;
 
@@ -276,8 +276,25 @@ void function_memwrite(char *packet)
     reply_ok();
 }
 
+int reason_to_stopcode(int reason) {
+    switch (reason) {
+        case REASON_DBGRQ:          return (0x02);
+        case REASON_BREAKPOINT:
+        case REASON_WATCHPOINT:
+        case REASON_WPTANDBKPT: 
+        case REASON_SINGLESTEP:
+        case REASON_EXC_CATCH:      return (0x05);
+        case REASON_NOTHALTED:      return (0x00);
+    }
+    lerp_panic("unknown reason code %d\r\n", reason);
+}
+
 void send_stop_packet(int thread, int reason) {
-    reply_printf("T%02dthread:%d;", reason, thread);
+    if (gdb_intr) {
+        reason = REASON_DBGRQ;
+        gdb_intr = 0;
+    }
+    reply_printf("T%02dthread:%d;", reason_to_stopcode(reason), thread);
 }
 
 
@@ -348,19 +365,24 @@ GDBFUNC(vCont) {
 
     core_select(cur);
 
+    // We now loop waiting for a core to stop ... during this we need to check for INTR input
+    // or a loss of connection...
     while(1) {
         int rc = check_cores();
         if (rc != -1) {
             debug_printf("CORE %d has halted\r\n", rc);
-            send_stop_packet(rc+1, 5);
+            send_stop_packet(rc+1, core_get_reason(rc));
             break;
         }
-
-        // We need to yield here so the usb task can get a look in...
-        task_yield();
-//        task_sleep_ms(1);;
-        int ch = io_peek_byte();
-        debug_printf("io peek = %d\r\n", ch);
+        if (!io_is_connected()) {
+            debug_printf("LOST CONNECTION\r\n");
+            core_halt();
+            return;
+        }
+        // A simple yield here potentially doesn't give enough time to output
+        // pending debug etc. So nicer to have a small sleep. A few ms really shouldn't
+        // impact performance.
+        task_sleep_ms(2);;
         // If we have CTRL-C then we need to stop ourselves...
         if (io_peek_byte() == 0x03) {
             debug_printf("Have CTRL-C\r\n");
@@ -370,20 +392,6 @@ GDBFUNC(vCont) {
     }
 }
 
-
-void XXfunction_vflash_erase(char *packet)
-{
-    uint32_t start, length;
-    char *p = get_two_hex_numbers(packet, ',', &start, &length);
-
-    if (!p || !length)
-    {
-        reply_err(1);
-        return;
-    }
-    reply_ok();
-    return;
-}
 
 GDBFUNC(vFlashWrite) {
     uint32_t start;
@@ -408,7 +416,7 @@ GDBFUNC(vFlashWrite) {
     // Make sure our source data is word aligned...
     char *p = malloc(len);
     if (!p)
-        panic("aarrgg");
+        lerp_panic("aarrgg");
     memcpy(p, packet, len);
 
     debug_printf("writing %d bytes into memory at %08x\r\n", len, p);
@@ -488,15 +496,21 @@ char *xfer_memory_map(int *len) {
     return (char *)rp2040_memory_map_xml;
 }
 char *xfer_threads(int *len) {
+    static const char *states[] = { "debug-request", "breakpoint", "watchpoint", 
+                                    "breakpoint-and-watchpoint", "single-step", 
+                                    "target-not-halted", "program-exit", "exception-catch",
+                                    "undefined" };
     static char *out = NULL;
+    int r0 = core_get_reason(0);
+    int r1 = core_get_reason(1);
     
     if (!out) out = malloc(1024);       // TODO: fix this
-    if (!out) panic("no memory");
+    if (!out) lerp_panic("no memory");
     *len = sprintf(out, "<?xml version=\"1.0\"?>\n<threads>\n"
                  "<thread id=\"1\">Name: rp2040.core0, state: %s</thread>\n"
                  "<thread id=\"2\">Name: rp2040.core1, state: %s</thread>\n"
                  "</threads>\n",
-            "breakpoint", "debug-request");
+            states[r0], states[r1]);
     return out;
 }
 
@@ -581,13 +595,23 @@ GDBFUNC(qRcmd) {
         reply_ok();
         return;
     } else if (strncmp(packet, "get_to_main", 11) == 0) {
+        int did_bp = 0;
+
+        if (!bp_is_set(symbol_main)) {
         // TODO: check if we fail to add the breakpoint
-        bp_set(symbol_main);
-        core_unhalt();
-        while(!core_is_halted()) {
-            // TODO: this could block, so we probably want a timeout
+            bp_set(symbol_main);
+            did_bp = 1;
         }
-        bp_clr(symbol_main);
+        core_unhalt();
+        for (int i=0; i < 200; i++) {
+            if (core_is_halted()) break;
+            task_sleep_ms(2);
+        }
+        if (!core_is_halted()) {
+            debug_printf("ERROR: failed to stop at main, stoppping now\r\n");
+            core_halt();
+        }
+        if (did_bp) bp_clr(symbol_main);
         reply_ok();
         return;
     }
@@ -712,13 +736,16 @@ int gdb_poll() {
 
     if (!was_connected) {
         // This is a new connection...
-        was_connected = 1;
         debug_printf("NEW CONNECTION\r\n");
         // What other state do we care about?
         gdb_noack = 0;
 
-        if (dp_init() != SWD_OK)
-            panic("unable to init DP");
+        if (dp_init() != SWD_OK) {
+            debug_printf("unable to connect to target, trying again...\r\n");
+            task_sleep_ms(250);
+            return 0;
+        }
+        was_connected = 1;
 
         core_select(0);
         core_reset_halt();
@@ -737,7 +764,8 @@ int gdb_poll() {
                 process_packet(gdb_buffer, gdb_blen);
                 break;
             case BP_INTR:
-                debug_printf("INTR (unexpected here)\r\n");
+                debug_printf("Interrupt Received\r\n");
+                gdb_intr = 1;
                 break;
             case BP_CORRUPT:
                 debug_printf("CORRUPT\r\n");

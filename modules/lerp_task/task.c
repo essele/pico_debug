@@ -199,26 +199,6 @@ static void update_timewait_tasks(uint32_t delta) {
 }
 
 
-/**
- * @brief Work out how much stack is left available for a given task (roughly in bytes)
- * 
- * This is a debug capability as it's slow, and it's not perfect
- * but it should give some indication of where there might be problems.
- * 
- * @param t 
- * @return int 
- */
-static int calc_stack_free(struct task *t) {
-    uint32_t *p = t->stack_end;
-    int i = 0;
-
-    while(*p == 0x55555555) {
-        i++;
-        p++;
-    }
-    return i * 4;
-}
-
 //
 // This is called by the SVC processor and needs to end with a new task set
 // in currentTCB so that it can execute.

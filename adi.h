@@ -18,6 +18,17 @@
 #define SWD_ERROR           3
 #define SWD_PARITY          4
 
+enum {
+    REASON_DBGRQ = 0,
+    REASON_BREAKPOINT = 1,
+    REASON_WATCHPOINT = 2,
+    REASON_WPTANDBKPT = 3,
+    REASON_SINGLESTEP = 4,
+    REASON_NOTHALTED = 5,
+    REASON_EXIT = 6,
+    REASON_EXC_CATCH = 7,
+    REASON_UNDEFINED = 8,
+};
 
 int swd_init();
 int dp_init();
@@ -43,6 +54,7 @@ int core_step_avoiding_breakpoint();
 int core_is_halted();
 int core_reset_halt();
 int check_cores();
+int core_get_reason(int num);
 
 uint32_t rp2040_find_rom_func(char ch1, char ch2);
 int rp2040_call_function(uint32_t addr, uint32_t args[], int argc);
@@ -52,5 +64,6 @@ int reg_write(int reg, uint32_t value);
 
 int bp_set(uint32_t addr);
 int bp_clr(uint32_t addr);
+int bp_is_set(uint32_t addr);
 
 #endif

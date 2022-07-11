@@ -9,6 +9,7 @@
 
 #include "lerp/task.h"
 #include "lerp/circ.h"
+#include "lerp/debug.h"
 
 #include "swd.h"
 #include "adi.h"
@@ -55,8 +56,8 @@ int usb_n_printf(int n, char *format, ...)
     return len;
 }
 
-#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
-#define gdb_printf(...) usb_n_printf(0, __VA_ARGS__)
+//#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
+//#define gdb_printf(...) usb_n_printf(0, __VA_ARGS__)
 
 
 
@@ -83,6 +84,9 @@ void main_poll() {
 
     // make sure the PIO blocks are managed...
     swd_pio_poll();
+
+    // handle any debug output...
+    debug_poll();
 }
 
 //
@@ -90,17 +94,18 @@ void main_poll() {
 // PostAttach Commands are run after the above
 //
 
-
+volatile int x;
 
 int main() {
     // Take us to 150Mhz (for future rmii support)
     set_sys_clock_khz(150 * 1000, true);
 
-    if (swd_init() != SWD_OK)
-        panic("unable to init SWD");
-
     // Initialise the USB stack...
     tusb_init();
+
+    // Initialise the PIO SWD system...
+    if (swd_init() != SWD_OK)
+        lerp_panic("unable to init SWD");
 
     // Create the GDB server task..
     gdb_init();

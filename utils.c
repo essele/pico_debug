@@ -62,7 +62,7 @@ char *get_two_hex_numbers(char *packet, char sepch, uint32_t *one, uint32_t *two
  */
 int hex_to_bin(char *packet) {
     int v;
-    uint8_t *dst = packet;
+    uint8_t *dst = (uint8_t *)packet;
     int len = 0;
 
     while((v = hex_byte(packet)) >= 0) {

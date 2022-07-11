@@ -10,14 +10,12 @@
 #include "swd.pio.h"
 
 #include "lerp/task.h"
+#include "lerp/debug.h"
 #include "swd.h"
 
-extern int usb_n_printf(int n, char *format, ...);
-#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
 
-
-#define SWDCLK              26
-#define SWDIO               22
+//#define PIN_SWDCLK              26
+//#define PIN_SWDIO               22
 
 #define OUT                 1
 #define IN                  0
@@ -118,15 +116,15 @@ int swd_init() {
     c = swd_program_get_default_config(0);      // 0=offset
 
     // Map the appropriate pins...
-    sm_config_set_out_pins(&c, SWDIO, 1);
-    sm_config_set_set_pins(&c, SWDIO, 1);
-    sm_config_set_in_pins(&c, SWDIO);
-    sm_config_set_sideset_pins(&c, SWDCLK);
+    sm_config_set_out_pins(&c, PIN_SWDIO, 1);
+    sm_config_set_set_pins(&c, PIN_SWDIO, 1);
+    sm_config_set_in_pins(&c, PIN_SWDIO);
+    sm_config_set_sideset_pins(&c, PIN_SWDCLK);
 
     // Setup PIO to GPIO
-    pio_gpio_init(pio, SWDCLK);
-    pio_gpio_init(pio, SWDIO);
-    gpio_pull_up(SWDIO);
+    pio_gpio_init(pio, PIN_SWDCLK);
+    pio_gpio_init(pio, PIN_SWDIO);
+    gpio_pull_up(PIN_SWDIO);
 
     // Get a state machine...
     swd_sm = pio_claim_unused_sm(pio, true);
@@ -136,8 +134,8 @@ int swd_init() {
     sm_config_set_in_shift(&c, true, true, 32);
 
     // Set directions...
-    pio_sm_set_consecutive_pindirs(pio, swd_sm, SWDCLK, 1, true);
-    pio_sm_set_consecutive_pindirs(pio, swd_sm, SWDIO, 1, false);
+    pio_sm_set_consecutive_pindirs(pio, swd_sm, PIN_SWDCLK, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, swd_sm, PIN_SWDIO, 1, false);
 
     // And initialise
     pio_sm_init(pio, swd_sm, 0, &c);    // 0=offset

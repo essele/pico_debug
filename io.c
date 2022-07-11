@@ -2,6 +2,7 @@
 #include "pico/printf.h"
 #include "lerp/task.h"
 #include "lerp/circ.h"
+#include "lerp/debug.h"
 #include "io.h"
 #include "tusb.h"
 
@@ -83,10 +84,7 @@ int io_put_byte(uint8_t ch) {
         reason = task_block();
         if (reason < 0) return reason;
     }
-    // debug
-    if (tud_cdc_n_connected(1)) {
-        tud_cdc_n_write_char(1, ch);
-    }
+    debug_putch(ch);
     circ_add_byte(outgoing, ch);
     return 0;
 }
@@ -148,8 +146,7 @@ int reply(char *text, uint8_t *hex, int hexlen) {
     }
     io_put_byte('#');
     io_put_hexbyte(sum);
-    // For debug (remove this)
-    if (tud_cdc_n_connected(1)) { tud_cdc_n_write_char(1, '\r'); tud_cdc_n_write_char(1, '\n'); }
+    debug_putch('\r'); debug_putch('\n');
     return 0;
 }
 int reply_part(char ch, char *text, int len) {
@@ -163,8 +160,7 @@ int reply_part(char ch, char *text, int len) {
     }
     io_put_byte('#');
     io_put_hexbyte(sum);
-    // For debug (remove this)
-    if (tud_cdc_n_connected(1)) { tud_cdc_n_write_char(1, '\r'); tud_cdc_n_write_char(1, '\n'); }
+    debug_putch('\r'); debug_putch('\n');
     return 0;
 }
 int reply_null() {
@@ -199,10 +195,7 @@ int reply_printf(char *format, ...) {
 
     io_put_byte('#');
     io_put_hexbyte(sum);
-
-    // For debug (remove this)
-    if (tud_cdc_n_connected(1)) { tud_cdc_n_write_char(1, '\r'); tud_cdc_n_write_char(1, '\n'); }
-
+    debug_putch('\r'); debug_putch('\n');
     return len;
 }
 

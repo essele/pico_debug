@@ -63,15 +63,24 @@ target_include_directories(pico-debug PUBLIC
 # Add all of our modules
 add_subdirectory(modules/lerp_task)
 add_subdirectory(modules/lerp_circ)
+add_subdirectory(modules/lerp_debug)
 
 target_compile_definitions(pico-debug PRIVATE
   # We don't want the default alarm pool (and the IRQ's associated!)
   PICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1
 
-#  DEBUG_UART_TX_PIN=16
-#  DEBUG_UART_RX_PIN=17
-#  DEBUG_UART=uart0
-#  DEBUG_UART_BAUD=115200
+  # Main pins for the SWD connections
+  PIN_SWDCLK=26
+  PIN_SWDIO=22
+
+  # Pins for the UART connection
+  PIN_UART_TX=4
+  PIN_UART_RX=5
+  UART_INTERFACE=uart0
+  UART_BAUD=115200
+
+  # Debug on CDC2
+  DEBUG_CDC2=1
 )
 
 target_compile_options(pico-debug PUBLIC
@@ -96,4 +105,5 @@ target_link_libraries(pico-debug
 
   lerp_task
   lerp_circ
+  lerp_debug
 )

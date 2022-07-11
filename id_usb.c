@@ -34,6 +34,10 @@
 #define USBD_CDC_1_EP_OUT (0x03)
 #define USBD_CDC_1_EP_IN (0x84)
 
+#define USBD_CDC_2_EP_CMD (0x85)
+#define USBD_CDC_2_EP_OUT (0x04)
+#define USBD_CDC_2_EP_IN (0x86)
+
 #define USBD_CDC_CMD_MAX_SIZE (8)
 #define USBD_CDC_IN_OUT_MAX_SIZE (64)
 
@@ -41,7 +45,9 @@
 #define USBD_STR_MANUF (0x01)
 #define USBD_STR_PRODUCT (0x02)
 #define USBD_STR_SERIAL (0x03)
-#define USBD_STR_CDC (0x04)
+#define USBD_STR_CDC0 (0x04)
+#define USBD_STR_CDC1 (0x05)
+#define USBD_STR_CDC2 (0x06)
 
 //
 // Officially, according to the USB specs, we shoul duse TUSB_CLASS_MISC, SUBCLASS_COMMON, and PROTOCOL_IAD
@@ -77,41 +83,30 @@ enum
   ITF_NUM_CDC_0_DATA,
   ITF_NUM_CDC_1,
   ITF_NUM_CDC_1_DATA,
+  ITF_NUM_CDC_2,
+  ITF_NUM_CDC_2_DATA,
   ITF_NUM_TOTAL
 };
 
 
-#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + (2 * TUD_CDC_DESC_LEN))
+#define CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + (3 * TUD_CDC_DESC_LEN))
 
 uint8_t const usbd_desc_cfg[] =
 {
   // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
 
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, USBD_STR_CDC, USBD_CDC_0_EP_CMD,
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, USBD_STR_CDC0, USBD_CDC_0_EP_CMD,
         USBD_CDC_CMD_MAX_SIZE, USBD_CDC_0_EP_OUT, USBD_CDC_0_EP_IN, USBD_CDC_IN_OUT_MAX_SIZE),
 
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, USBD_STR_CDC, USBD_CDC_1_EP_CMD,
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, USBD_STR_CDC1, USBD_CDC_1_EP_CMD,
         USBD_CDC_CMD_MAX_SIZE, USBD_CDC_1_EP_OUT, USBD_CDC_1_EP_IN, USBD_CDC_IN_OUT_MAX_SIZE),
+
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_2, USBD_STR_CDC2, USBD_CDC_2_EP_CMD,
+        USBD_CDC_CMD_MAX_SIZE, USBD_CDC_2_EP_OUT, USBD_CDC_2_EP_IN, USBD_CDC_IN_OUT_MAX_SIZE),
 };
 
 
-
-/*
-#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
-#define USBD_ITF_CDC       (0) // needs 2 interfaces
-#define USBD_ITF_MAX       (2)
-#define USBD_MAX_POWER_MA (250)
-
-
-static const uint8_t usbd_desc_cfg[USBD_DESC_LEN] = {
-    TUD_CONFIG_DESCRIPTOR(1, USBD_ITF_MAX, USBD_STR_0, USBD_DESC_LEN,
-        0, USBD_MAX_POWER_MA),
-
-    TUD_CDC_DESCRIPTOR(USBD_ITF_CDC, USBD_STR_CDC, USBD_CDC_EP_CMD,
-        USBD_CDC_CMD_MAX_SIZE, USBD_CDC_EP_OUT, USBD_CDC_EP_IN, USBD_CDC_IN_OUT_MAX_SIZE),
-};
-*/
 const uint8_t *tud_descriptor_device_cb(void) {
     return (const uint8_t *)&usbd_desc_device;
 }
@@ -167,7 +162,15 @@ const uint16_t *tud_descriptor_string_cb(uint8_t index, __unused uint16_t langid
             len = string_to_descriptor("11223344", desc_str);
             break;
 
-        case USBD_STR_CDC:
+        case USBD_STR_CDC0:
+            len = string_to_descriptor("pico-gdb", desc_str);
+            break;
+
+        case USBD_STR_CDC1:
+            len = string_to_descriptor("pico-uart", desc_str);
+            break;
+
+        case USBD_STR_CDC2:
             len = string_to_descriptor("pico-debug", desc_str);
             break;
 

@@ -1,12 +1,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
+#include "lerp/debug.h"
 
 #include "adi.h"
 #include "swd.h"
-
-extern int usb_n_printf(int n, char *format, ...);
-#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
 
 //
 // Debug Port Register Addresses
@@ -76,13 +74,6 @@ enum {
     STATE_HALTED,
 };
 
-enum {
-    REASON_UNKNOWN,
-    REASON_DEBUG,
-    REASON_BREAKPOINT,
-    REASON_STEP,
-    REASON_RESET,
-};
 
 struct core {
     int                 state;
@@ -610,6 +601,7 @@ int mem_read_block(uint32_t addr, uint32_t count, uint8_t *dest) {
 #define DCB_DCRDR       0xE000EDF8
 #define DCB_DEMCR       0xE000EDFC
 #define DCB_DSCSR       0xE000EE08
+#define DCB_DFSR        0xE000ED30
 
 #define NVIC_AIRCR      0xE000ED0C
 
@@ -685,11 +677,15 @@ int reg_write(int reg, uint32_t value) {
 //static uint32_t breakpoints[4] = { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
 static const uint32_t bp_reg[4] = { 0xE0002008, 0xE000200C, 0xE0002010, 0xE0002014 };
 
-int bp_find(uint32_t addr) {
+static inline int bp_find(uint32_t addr) {
     for (int i=0; i < 4; i++) {
         if (core->breakpoints[i] == addr) return i;
     }
     return -1;
+}
+
+int bp_is_set(uint32_t addr) {
+    return (bp_find(addr) != -1);
 }
 
 int bp_set(uint32_t addr) {
@@ -720,20 +716,20 @@ int bp_clr(uint32_t addr) {
     if (bp == -1) return SWD_OK;        // we don't have it? Error?
     core->breakpoints[bp] = 0xffffffff;
     rc = mem_write32(bp_reg[bp], 0);      // fully disabled
-    rc = mem_write32(bp_reg[bp], 0);      // fully disabled
     return rc;
 }
 
-int bp_is_set(uint32_t addr) {
-    for (int i=0; i < 4; i++) {
-        if (core->breakpoints[i] == addr) return 1;
-    }
-    return 0;
-}
 
 
 int core_enable_debug() {
-    return mem_write32(DCB_DHCSR, (0xA05F << 16) | 1);
+    // Enable debug
+    CHECK_OK(mem_write32(DCB_DHCSR, (0xA05F << 16) | 1));
+
+    // Clear each of the breakpoints...
+    for (int i=0; i < 4; i++) {
+        CHECK_OK(mem_write32(bp_reg[i], 0));
+    }
+    return SWD_OK;
 }
 
 int core_halt() {
@@ -751,6 +747,7 @@ int core_halt() {
         if (rc != SWD_OK) return rc;
         if (value & 0x00020000) break;
     }
+    core->reason = REASON_DBGRQ;
     return SWD_OK;
 }
 
@@ -792,6 +789,7 @@ int core_step() {
     mem_cache_invalidate();
 
     core->state = STATE_RUNNING;
+    core->reason = REASON_SINGLESTEP;
     return SWD_OK;
 }
 
@@ -826,10 +824,6 @@ int core_is_halted() {
     uint32_t value;
 
     rc = mem_read32(DCB_DHCSR, &value);
-
-    if (rc != SWD_OK) {
-        panic("HERE");
-    }
     if (rc != SWD_OK) return -1;
     if (value & (1<<17)) return 1;
     return 0;
@@ -837,8 +831,10 @@ int core_is_halted() {
 
 int core_update_status() {
     uint32_t dhcsr;
+    uint32_t dfsr;
 
     CHECK_OK(mem_read32(DCB_DHCSR, &dhcsr));
+    CHECK_OK(mem_read32(DCB_DFSR, &dfsr));
 
     // Are we halted or running...
     if (dhcsr & (1<<17)) {
@@ -849,9 +845,17 @@ int core_update_status() {
 
     // Do we know why?
     if (dhcsr & (1<<25)) {
-        core->reason = REASON_RESET;
+        core->reason = REASON_DBGRQ;
+    } else if (dfsr & (1<<1)) {
+        debug_printf("dfsr=0x%08x\r\n", dfsr);
+        core->reason = REASON_BREAKPOINT;
+        CHECK_OK(mem_write32(DCB_DFSR, (1<<1)));    // clear the BKPT bit
     }
     return SWD_OK;
+}
+
+int core_get_reason(int num) {
+    return cores[num].reason;
 }
 
 
@@ -984,8 +988,8 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
 
 
     rc = core_is_halted();
-    if (rc == -1) panic("aaarg!");
-    if (!rc) panic("core not halted");
+    if (rc == -1) lerp_panic("aaarg!");
+    if (!rc) lerp_panic("core not halted");
 
     // Now can we continue and just wait for a halt?
 //    core_unhalt();
@@ -993,7 +997,7 @@ int rp2040_call_function(uint32_t addr, uint32_t args[], int argc) {
     while(1) {
         busy_wait_ms(2);
         rc = core_is_halted();
-        if (rc == -1) panic("here");
+        if (rc == -1) lerp_panic("here");
         if (rc) break;
     }
 
@@ -1067,7 +1071,6 @@ int dp_core_select(int num) {
     swd_targetsel(num == 0 ? TARGET_CORE_0 : TARGET_CORE_1);
 
     CHECK_OK(swd_read(0, DP_DPIDR, &rv));
-    debug_printf("dp_core_select(%d) dpidr = 0x%08x\r\n", num, rv);
     return SWD_OK;
 }
 
@@ -1079,14 +1082,12 @@ int dp_core_select(int num) {
  * @return int 
  */
 int dp_core_select_and_confirm(int num) {
-    int rc;
     uint32_t rv;
 
     CHECK_OK(dp_core_select(num));
     CHECK_OK(swd_write(0, DP_ABORT, ALLERRCLR));
     CHECK_OK(swd_write(0, DP_SELECT, 0));
     CHECK_OK(swd_read(0, DP_CTRL_STAT, &rv));
-    debug_printf("dp_core_confirm(%d) ctrl/stat = 0x%08x\r\n", num, rv);
     return SWD_OK;
 }
 
@@ -1122,12 +1123,10 @@ int dp_power_on() {
  * responds, it also powers up the relevant bits and sets debug enabled.
  */
 int dp_initialise() {
-    int rc;
-
     // Initialise the core structures...
     for (int i=0; i < 2; i++) {
         cores[i].state = STATE_UNKNOWN;
-        cores[i].reason = REASON_UNKNOWN;
+        cores[i].reason = REASON_UNDEFINED;
         cores[i].dp_select_cache = 0xffffffff;
         cores[i].ap_mem_csw_cache = 0xffffffff;
         for (int j=0; j < 4; j++) {
@@ -1140,8 +1139,6 @@ int dp_initialise() {
     mem_cache_invalidate();
     core = NULL;
 
-
-
     swd_from_dormant();
     int have_reset = 0;
 
@@ -1150,9 +1147,8 @@ int dp_initialise() {
         while (1) {
             if (dp_core_select_and_confirm(c) != SWD_OK) {
                 if (dp_core_select_and_confirm(c) != SWD_OK) {
-                    if (have_reset) {
-                        panic("unable to talk to cores\r\n");
-                    }
+                    // If we've already reset, then this is fatal...
+                    if (have_reset) return SWD_ERROR;
                     dp_rescue_reset();
                     swd_from_dormant();     // seem to need this?
                     have_reset = 1;
@@ -1164,13 +1160,18 @@ int dp_initialise() {
             core->dp_select_cache = 0;
             if (dp_power_on() != SWD_OK) continue;
 
-            // Now we can enable debugging...
+            // Now we can enable debugging... (and remove breakpoints)
             if (core_enable_debug() != SWD_OK) continue;
 
             // If we get here, then this core is fine...
             break;
         }
     }
+    // And lets make sure we end on core 0
+    if (dp_core_select(0) != SWD_OK) {
+        return SWD_ERROR;
+    }
+    core = &cores[0];
 /*
     // Now try to read DP_DLIDR (bank 3)
     rc = swd_write(0, DP_SELECT, 0x3);
@@ -1192,13 +1193,9 @@ int core_select(int num) {
     uint32_t dpidr = 0;
     uint32_t dlpidr = 0;
     uint32_t targetid;
-
-    debug_printf("asked to select core %d\r\n", num);
     
     // See if we are already selected...
     if (core == &cores[num]) return SWD_OK;
-
-    debug_printf("actually selecting core %d\r\n", num);
 
     CHECK_OK(dp_core_select(num));
     
@@ -1213,16 +1210,6 @@ int core_select(int num) {
     CHECK_OK(dp_read(DP_DLPIDR, &dlpidr));
 
     // TODO: shouldn't we validate DPIDR with DLPIDR?
-    return SWD_OK;
-    
-
-    // TODO: this doesn't work
-    debug_printf("HAVE DPIDR=%08x DLPIDR=%08x\r\n", dpidr, dlpidr);
-
-    if ((dlpidr & 0xf0000000) != (targetid & 0xf0000000)) return SWD_ERROR;
-
-    debug_printf("core %d selected ok\r\n", num);
-
     return SWD_OK;
 }
 
@@ -1276,14 +1263,8 @@ int check_cores() {
 
 
 int dp_init() {
-    // Initialise and switch out of dormant mode (select target 0)
-    if (dp_initialise() != SWD_OK) panic("unable to initialise dp\r\n");
-//    if (dp_power_on() != SWD_OK) panic("unable to power on dp (core0)\r\n");
-//    if (core_enable_debug() != SWD_OK) panic("unable to enable debug on core0\r\n");
-//    if (core_select(1) != SWD_OK) panic("unable to select core1\r\n");
-//    if (dp_power_on() != SWD_OK) panic("unable to power on core1\r\n");
-//    if (core_enable_debug() != SWD_OK) panic("unable to enable debug on core1\r\n");
-    if (core_select(0) != SWD_OK) panic("unable reselect core 0\r\n");
+    CHECK_OK(dp_initialise());
+    CHECK_OK(core_select(0));
     return SWD_OK;
 }
 

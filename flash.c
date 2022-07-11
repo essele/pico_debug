@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "pico/stdlib.h"
+#include "lerp/debug.h"
 
 #include "adi.h"
 
@@ -39,9 +40,6 @@
 #define BOOT2_START         0x20020000
 #define STACK_ADDDR         0x20040800
 #define FLASH_BASE          0x10000000
-
-extern int usb_n_printf(int n, char *format, ...);
-#define debug_printf(...) usb_n_printf(1, __VA_ARGS__)
 
 static int flash_code_copied = 0;
 
@@ -65,7 +63,7 @@ static int rp2040_program_flash_chunk(int offset, int length) {
         debug_printf("copying code\r\n");
         int code_len = (__stop_for_target - __start_for_target);
         rc = mem_write_block(CODE_START, code_len, (uint8_t *)__start_for_target);
-        if (rc != SWD_OK) panic("fail");
+        if (rc != SWD_OK) return rc;
         flash_code_copied = 1;
     }
 
@@ -73,7 +71,7 @@ static int rp2040_program_flash_chunk(int offset, int length) {
 
     uint32_t args[] = { offset, DATA_BUFFER, length };
     rc = rp2040_call_function(CODE_START, args, sizeof(args)/sizeof(uint32_t));
-    if (rc != SWD_OK) panic("fail");
+    if (rc != SWD_OK) return rc;
 
     uint32_t r0, erased, programmed;
     rc = reg_read(0, &r0);

@@ -20,6 +20,7 @@ static struct swbp *find_swbp(uint32_t addr) {
     struct swbp *p = sw_breakpoints;
     while (p) {
         if (p->addr == addr) return p;
+        p = p->next;
     }
     return NULL;
 }
