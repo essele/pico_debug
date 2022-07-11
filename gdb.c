@@ -162,10 +162,6 @@ int decode_xfer_read(char *packet, int *offset, int *length) {
 }
 
 
-
-
-
-
 void function_get_sys_regs() {
     static char *buf = NULL;
 
@@ -289,6 +285,15 @@ int reason_to_stopcode(int reason) {
     lerp_panic("unknown reason code %d\r\n", reason);
 }
 
+/**
+ * @brief Called when we detect a stopped core, reports status back
+ * 
+ * This also keeps an eye on whether we've received an interrupt request
+ * so we can adjust the reason accordingly (stops runaway stepping sessions.)
+ * 
+ * @param thread 
+ * @param reason 
+ */
 void send_stop_packet(int thread, int reason) {
     if (gdb_intr) {
         reason = REASON_DBGRQ;
