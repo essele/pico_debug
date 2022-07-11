@@ -11,6 +11,7 @@ This is very much work-in-progress and will develop over time, currently working
 - Clockable up to 25Mhz (over 6" jumper leads!)
 - Very very basic GDB server (over USB CDC) to eliminate need for OpenOCD
 - Delta based flashing (only program if the different)
+- Calls the boot_stage2 to improve flash performance for delta compare
 - Comparing full flashing (not delta) for a 276K image: pico-probe is 17kb/s or 16s. This is 94kb/s or 3s!
 - Small memory cache for optimising GDB reads, significantly improves stepping performance.
 - Efficient co-operative multitasking speeds up transfers and general interaction.
