@@ -163,15 +163,15 @@ const uint16_t *tud_descriptor_string_cb(uint8_t index, __unused uint16_t langid
             break;
 
         case USBD_STR_CDC0:
-            len = string_to_descriptor("pico-gdb", desc_str);
+            len = string_to_descriptor("debug-gdb", desc_str);
             break;
 
         case USBD_STR_CDC1:
-            len = string_to_descriptor("pico-uart", desc_str);
+            len = string_to_descriptor("debug-uart", desc_str);
             break;
 
         case USBD_STR_CDC2:
-            len = string_to_descriptor("pico-debug", desc_str);
+            len = string_to_descriptor("debug-debug", desc_str);
             break;
 
         default:

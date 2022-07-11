@@ -70,8 +70,8 @@ target_compile_definitions(pico-debug PRIVATE
   PICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1
 
   # Main pins for the SWD connections
-  PIN_SWDCLK=26
-  PIN_SWDIO=22
+  PIN_SWDCLK=2
+  PIN_SWDIO=3
 
   # Pins for the UART connection
   PIN_UART_TX=4
