@@ -23,6 +23,7 @@ add_executable(pico-debug
 
     flash.c flash.h
     io.c io.h
+    uart.c uart.h
 
     gdb.c gdb.h
     breakpoint.c breakpoint.h
@@ -76,8 +77,11 @@ target_compile_definitions(pico-debug PRIVATE
   # Pins for the UART connection
   PIN_UART_TX=4
   PIN_UART_RX=5
-  UART_INTERFACE=uart0
+  UART_INTERFACE=uart1
   UART_BAUD=115200
+
+  # Which CDC port to use for UART
+  UART_CDC=1
 
   # Debug on CDC2
   DEBUG_CDC2=1
