@@ -10,7 +10,8 @@ This is very much work-in-progress and will develop over time, currently working
 - SWD non-success checking in PIO stopping unneccessary delay
 - Clockable up to 25Mhz (over 6" jumper leads!)
 - Very very basic GDB server (over USB CDC) to eliminate need for OpenOCD
-- Delta based flashing (only program if the different)
+- Delta based flashing (only program blocks if needed)
+- Calls the boot_stage2 to improve flash performance for delta compare
 - Comparing full flashing (not delta) for a 276K image: pico-probe is 17kb/s or 16s. This is 94kb/s or 3s!
 - Small memory cache for optimising GDB reads, significantly improves stepping performance.
 - Efficient co-operative multitasking speeds up transfers and general interaction.
@@ -62,7 +63,7 @@ All of these issues compound and you get overall poor debug performance and slow
 
 **4. Delta based flashing** ... when flashing a device I copy some custom code to the target, then copy the firmware over as the requests come in, once it gets to 64K then the custom code runs a comparison and if there are only minor differences (up to two 4k pages) then only they are flashed, anything more and the whole 64K chunk is done. This results is signficantly improved flashing times, and no flashing if the code is the same!
 
-**5. Memory Cache** ... I've added a small (4 words) memory cache which is cleared whenever a core halts or a write is done, this means that many of the inefficiencies about how GDB reads memory on a halt are covered and it doesn't require an SWD read.
+**5. Memory Cache** ... I've added a small (4 words) memory cache which is cleared whenever a core halt or a memory write is done, this means that many of the inefficiencies about how GDB reads memory on a halt are covered and it doesn't require an SWD read.
 
 With all of the above you get much quicker flashing times and a much more (almost instant) debug experience when stepping through code. I haven't done normal debug cycle comparisons yet, but forced full flash timings are significantly better (3s vs 16s) and I have some further thoughts about double buffering do I can continue to transfer data while I'm waiting for the erase/programming to happen.
 
@@ -116,7 +117,7 @@ So follow the normal instructions to get your VSCode environment up and running,
 }
 ```
 
-This is working well for me and gives good consistent experience for both launching and resetting, and in each case stops at main ready for your debugging session (I had lots of issues previously on reset where it would run for a bit and then eventually break at some random point.)
+This is working well for me and gives good consistent experience for both launching and resetting, and in each case stops at main ready for your debugging session (I had lots of issues with OpenOCD previously on reset where it would run for a bit and then eventually break at some random point.)
 
 NOTE: the "ttyACM2" reference is the serial port which is the "GDB" port presented by the this debugger. You need to be careful here at the device will currently present three serial interfaces (see below.)
 
@@ -124,8 +125,8 @@ NOTE: the "ttyACM2" reference is the serial port which is the "GDB" port present
 
 This debugger actually presents three serial interfaces (USB CDC) to the host, on linux they always seem to be nicely ordered, whereas on Windows it seems to apply some randmisation just to make your life difficult.
 
-1. The "remote" GDB port -- this is where you need to point GDB, in our case in the launch.json file.
-2. The "UART" port -- this will be a mirror of the picoprobe UART capability, but I haven't done it yet.
+1. The remote "gdb" port -- this is where you need to point GDB, in our case in the launch.json file.
+2. The "uart" port -- this will be a mirror of the picoprobe UART capability, but I haven't done it yet.
 3. The "debug" port -- I'm using this for debugging, it will output most of the GDB packets and some other stuff.
 
 The debug port has a 4K circular buffer that it uses to keep any debug output, if you connect to that port with a serial/terminal program it will output anything it has bufferred before becoming more real time, so if something stops working you can connect to it and see what has happened, you don't need to be connected all the time. (Note: debugging messages are not of a high quality! Currently.)
