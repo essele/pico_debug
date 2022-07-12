@@ -21,7 +21,6 @@
 #include "gdb.h"
 
 
-
 /**
  * @brief Main polling function called regularly by lerp_task
  * 
