@@ -15,12 +15,9 @@
 #include "adi.h"
 #include "flash.h"
 #include "uart.h"
-
 #include "tusb.h"
 #include "filedata.h"
-
 #include "io.h"
-
 #include "gdb.h"
 
 
