@@ -30,7 +30,8 @@
         "string.h": "c",
         "rmii_config.h": "c",
         "conn.h": "c",
-        "ssi.h": "c"
+        "ssi.h": "c",
+        "flash.h": "c"
     },
     "cortex-debug.variableUseNaturalFormat": false,
     "cortex-debug.registerUseNaturalFormat": false
