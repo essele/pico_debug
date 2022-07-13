@@ -10,6 +10,7 @@ This is very much work-in-progress and will develop over time, currently working
 - SWD non-success checking in PIO stopping unneccessary delay
 - Clockable up to 25Mhz (over 6" jumper leads!)
 - Very very basic GDB server (over USB CDC) to eliminate need for OpenOCD
+- Supports UART forwarding as per the picoprobe
 - Delta based flashing (only program blocks if needed)
 - Calls the boot_stage2 to improve flash performance for delta compare
 - Comparing full flashing (not delta) for a 276K image: pico-probe is 17kb/s or 16s. This is 94kb/s or 3s!
@@ -21,7 +22,6 @@ This is very much work-in-progress and will develop over time, currently working
 Still to do:
 
 - Proper handling of maskints for halt/step/continue
-- UART support (spare cdc ready, just not implemented yet)
 - Parallel flashing test - i.e. transfer & flash at the same time
 - Mechanism to change the speed (currently fixed at 25MHz)
 - Lots of code tidy up ... genericising where possible.
