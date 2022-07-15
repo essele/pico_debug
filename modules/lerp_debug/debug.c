@@ -14,7 +14,7 @@
 #include "lerp/circ.h"
 #include "lerp/debug.h"
 
-#ifdef DEBUG_PORT
+#if defined DEBUG_UART || defined DEBUG_CDC || defined DEBUG_BUF
 
 #ifdef DEBUG_CDC
 #include "tusb.h"
@@ -67,14 +67,14 @@ int debug_poll() {
 #endif
 #ifdef DEBUG_CDC
     int need_flush = 0;
-    if (!tud_cdc_n_connected(DEBUG_PORT)) return 0;
+    if (!tud_cdc_n_connected(DEBUG_CDC)) return 0;
 
     while (circ_has_data(circ_debug)) {
-        if (!tud_cdc_n_write_available(DEBUG_PORT)) return 1;
-        tud_cdc_n_write_char(DEBUG_PORT, circ_get_byte(circ_debug));
+        if (!tud_cdc_n_write_available(DEBUG_CDC)) return 1;
+        tud_cdc_n_write_char(DEBUG_CDC, circ_get_byte(circ_debug));
         need_flush = 1;
     }
-    if (need_flush) tud_cdc_n_write_flush(DEBUG_PORT);
+    if (need_flush) tud_cdc_n_write_flush(DEBUG_CDC);
 #endif
     return 0;
 }
@@ -85,7 +85,7 @@ int debug_poll() {
  */
 void debug_init() {
 #ifdef DEBUG_UART
-    uart_init(DEBUG_PORT, DEBUG_UART_BAUD);
+    uart_init(DEBUG_UART, DEBUG_UART_BAUD);
 
     // Set the TX and RX pins by using the function select on the GPIO
     // Set datasheet for more information on function select

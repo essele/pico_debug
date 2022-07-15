@@ -57,11 +57,13 @@ static int rp2040_program_flash_chunk(int offset, int length) {
     extern char __stop_for_target[];
     int rc;
 
+    debug_printf("FLASH: Request to flash 0x%08x (len=%d)\r\n", offset, length);
+
     // Copy the code over ... only needed once per flashing cycle...
 
     if (!flash_code_copied) {
-        debug_printf("copying code\r\n");
         int code_len = (__stop_for_target - __start_for_target);
+        debug_printf("FLASH: Copying custom flash code to 0x%08x (%d bytes)\r\n", CODE_START, code_len);
         rc = mem_write_block(CODE_START, code_len, (uint8_t *)__start_for_target);
         if (rc != SWD_OK) return rc;
         flash_code_copied = 1;
@@ -79,7 +81,7 @@ static int rp2040_program_flash_chunk(int offset, int length) {
     erased = (r0 >> 24) * 4;
     programmed = r0 & 0x00ffffff;
 
-    debug_printf("FLASH BLOCK: Erased %dk and programmed %d bytes in %dms\r\n", erased, programmed, (time_us_32() - t)/1000);
+    debug_printf("FLASH: Erased %dk and programmed %d bytes in %dms\r\n", erased, programmed, (time_us_32() - t)/1000);
 
     return 0;
 }
@@ -103,6 +105,9 @@ static uint32_t     chunk_size = 0;         // how much is already done
 
 int rp2040_add_flash_bit(uint32_t offset, uint8_t *src, int size) {
     int rc;
+
+    debug_printf("FLASH: writing %d bytes to flash at 0x%08x\r\n", size, offset);
+
 
     // If we are starting outside the range of an existing block...
     if (chunk_size && (offset >= (chunk_start + 65536))) {
@@ -133,7 +138,7 @@ int rp2040_add_flash_bit(uint32_t offset, uint8_t *src, int size) {
             debug_printf("COPY FAILED: %d\r\n", rc);
             return 1;;
         }
-        debug_printf("Copied %d bytes to location 0x%08x (%d ms)\r\n", count, DATA_BUFFER+(offset-chunk_start),
+        debug_printf("FLASH: Copied %d bytes to location 0x%08x (%d ms)\r\n", count, DATA_BUFFER+(offset-chunk_start),
                                                                             (time_us_32() - t)/1000);
         chunk_size += count;
 
@@ -256,7 +261,9 @@ FOR_TARGET int flash_block(uint32_t offset, uint8_t *src, int length) {
         }
         // reconnect xip
         _flash_flush_cache();
-        _flash_enter_cmd_xip();
+//        _flash_enter_cmd_xip();
+        // Call the second stage bootloader... reconnect XIP
+        ((void (*)(void))BOOT2_START+1)();
         return (change_count << 24) | rc;
     }
     

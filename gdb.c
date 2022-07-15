@@ -1,5 +1,6 @@
 
 #include "pico/stdlib.h"
+#include "pico/printf.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,15 +8,18 @@
 #include "gdb.h"
 #include "swd.h"
 #include "adi.h"
-#include "io.h"
+#include "lerp/io.h"
 #include "lerp/task.h"
 #include "utils.h"
 #include "flash.h"
 #include "breakpoint.h"
 
 #include "lerp/debug.h"
+#include "lerp/io.h"
 
 #include "filedata.h"
+
+
 
 #define GDB_BUFFER_SIZE 16384
 
@@ -25,6 +29,7 @@ static int gdb_blen;
 static int gdb_noack = 0;
 static int gdb_intr = 0;        // have we received an interrupt?
 
+struct io *gdb_io = NULL;       // the IO structure for GDB
 
 // -------------------------------------------------------------------------------------
 // We look at the gdb packet and use the first letter to work out what to do, where this
@@ -81,7 +86,7 @@ static int build_packet() {
     static int supplied_sum;
     int digit;
 
-    while ((ch = io_get_byte()) >= 0) {
+    while ((ch = io_get_byte(gdb_io)) >= 0) {
         switch (state) {
             case BP_INIT:
                 gdb_bp = gdb_buffer;
@@ -138,6 +143,80 @@ static int build_packet() {
     return BP_RUNNING;
 }
 
+
+// -----------------------------------------------------------------------------
+// The Various Reply Functions (using io)
+// -----------------------------------------------------------------------------
+
+int reply(char *text, uint8_t *hex, int hexlen) {
+    uint8_t sum = 0;
+
+    io_put_byte(gdb_io, '$');
+
+    if (text) {
+        char *p = text;
+        while (*p) {
+            sum += *p;
+            io_put_byte(gdb_io, *p++);
+        }
+    }
+    if (hex) {
+        uint8_t *p = hex;
+        while (hexlen--) {
+            sum += io_put_hexbyte(gdb_io, *p++);
+        }
+    }
+    io_put_byte(gdb_io, '#');
+    io_put_hexbyte(gdb_io, sum);
+    return 0;
+}
+int reply_part(char ch, char *text, int len) {
+    uint8_t sum = ch;
+
+    io_put_byte(gdb_io, '$');
+    io_put_byte(gdb_io, ch);
+    while (len--) {
+        sum += *text;
+        io_put_byte(gdb_io, *text++);
+    }
+    io_put_byte(gdb_io, '#');
+    io_put_hexbyte(gdb_io, sum);
+    return 0;
+}
+int reply_null() {
+    return reply(NULL, NULL, 0);
+}
+
+int reply_ok() {
+    return reply("OK", NULL, 0);
+}
+
+int reply_err(uint8_t err) {
+    return reply("E", &err, 1);
+}
+
+static void _reply_out(char ch, void *arg) {
+    uint8_t *sp = (uint8_t *)arg;
+
+    *sp += ch;
+    io_put_byte(gdb_io, ch);
+}
+
+int reply_printf(char *format, ...) {
+    uint8_t sum = 0;
+    int len;
+
+    io_put_byte(gdb_io, '$');
+
+    va_list args;
+    va_start(args, format);
+    len = vfctprintf(_reply_out, &sum, format, args);
+    va_end(args);
+
+    io_put_byte(gdb_io, '#');
+    io_put_hexbyte(gdb_io, sum);
+    return len;
+}
 
 /**
  * @brief Decode a "filename:offset,length.." construct
@@ -283,6 +362,7 @@ int reason_to_stopcode(int reason) {
         case REASON_NOTHALTED:      return (0x00);
     }
     lerp_panic("unknown reason code %d\r\n", reason);
+    return 0;
 }
 
 /**
@@ -379,7 +459,7 @@ GDBFUNC(vCont) {
             send_stop_packet(rc+1, core_get_reason(rc));
             break;
         }
-        if (!io_is_connected()) {
+        if (!io_is_connected(gdb_io)) {
             debug_printf("LOST CONNECTION\r\n");
             core_halt();
             return;
@@ -389,7 +469,7 @@ GDBFUNC(vCont) {
         // impact performance.
         task_sleep_ms(2);;
         // If we have CTRL-C then we need to stop ourselves...
-        if (io_peek_byte() == 0x03) {
+        if (io_peek_byte(gdb_io) == 0x03) {
             debug_printf("Have CTRL-C\r\n");
             core_halt();
             continue;
@@ -413,7 +493,6 @@ GDBFUNC(vFlashWrite) {
 
     packet += delta;
     len -= delta;
-    debug_printf("writing %d bytes to flash at 0x%08x\r\n", len, start);
 
     // TODO: look at whether we really need to do this ... does it actually make a
     // difference ... if it does, then maybe a memmove back a few bytes will be better.
@@ -423,9 +502,6 @@ GDBFUNC(vFlashWrite) {
     if (!p)
         lerp_panic("aarrgg");
     memcpy(p, packet, len);
-
-    debug_printf("writing %d bytes into memory at %08x\r\n", len, p);
-
     rp2040_add_flash_bit(start & 0x00ffffff, (uint8_t *)p, len);
     free(p);
 
@@ -689,18 +765,25 @@ void process_table(const struct gdbitem *table, char *packet, int packet_size) {
     reply_null();
 }
 
+void debug_packet(char *packet, int packet_size) {
+    if (strncmp(packet, "vFlashWrite", 11) == 0) {
+        char *p = packet + 12; // get past colon
+        while (*p++ != ':'); // get past final colon
+
+        int hlen = p - packet;
+        debug_printf("PKT [%.*s<%d bytes>]\r\n", hlen, packet, packet_size-hlen);
+    } else {
+        debug_printf("PKT [%.*s]\r\n", packet_size, packet);
+    }
+}
 
 
 void process_packet(char *packet, int packet_size)
 {
     // TODO: checksum
-    if (!gdb_noack) io_put_byte('+');
+    if (!gdb_noack) io_put_byte(gdb_io, '+');
 
-    if (strncmp(packet, "vFlashWrite", 11) == 0) {
-        debug_printf("FLASH WRITE PACKET\r\n");
-    } else {
-        debug_printf("PKT [%.*s]\r\n", packet_size, packet);
-    }
+    debug_packet(packet, packet_size);
 
     switch(*packet) {
         case 'm':   function_memread(packet+1); return;
@@ -729,11 +812,12 @@ void process_packet(char *packet, int packet_size)
 }
 
 
+// TODO: this isn't really a polling function ... more of a server!
 int gdb_poll() {
     static int was_connected = 0;
     int rc;
 
-    if (!io_is_connected()) {
+    if (!io_is_connected(gdb_io)) {
         // We need to let the idle task do it's thing...
         task_sleep_ms(5);
         return 0;
@@ -802,7 +886,12 @@ int gdb_poll() {
 
 DEFINE_TASK(gdbsvr, 1024);
 
+
 void func_gdbsvr(void *arg) {
+
+    // Initialise the IO mechanism for GDB (both CDC and TCP)...
+    gdb_io = io_init(GDB_CDC, GDB_TCP, 4096);
+
     debug_printf("HERE\r\n");
     while(1) {
         gdb_poll();

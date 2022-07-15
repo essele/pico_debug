@@ -1192,7 +1192,6 @@ int core_get() {
 int core_select(int num) {
     uint32_t dpidr = 0;
     uint32_t dlpidr = 0;
-    uint32_t targetid;
     
     // See if we are already selected...
     if (core == &cores[num]) return SWD_OK;

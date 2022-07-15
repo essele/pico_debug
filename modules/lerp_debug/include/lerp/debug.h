@@ -18,32 +18,11 @@
 //
 // We control the output mechanism depending on what define is defined...
 //
-// DEBUG_UART0
-// DEBUG_UART1
-// DEBUG_CDC0
-// DEBUG_CDC1
-// DEBUG_CDC2
-//
+// DEBUG_UART (=uart0 or =uart1)
+// DEBUG_CDC (=0, 1, 2, etc)
+// DEBUG_BUF (just buffer it, something else will collect it)
 
-#if defined DEBUG_UART0
-#define DEBUG_UART
-#define DEBUG_PORT uart0
-#elif defined DEBUG_UART1
-#define DEBUG_UART
-#define DEBUG_PORT uart1
-#elif defined DEBUG_CDC0
-#define DEBUG_CDC
-#define DEBUG_PORT 0
-#elif defined DEBUG_CDC1
-#define DEBUG_CDC
-#define DEBUG_PORT 1
-#elif defined DEBUG_CDC2
-#define DEBUG_CDC
-#define DEBUG_PORT 2
-#endif
-
-
-#ifdef DEBUG_PORT
+#if defined DEBUG_UART || defined DEBUG_CDC || defined DEBUG_BUF
 
 typedef unsigned long uint32_t;
 
@@ -60,7 +39,7 @@ void debug_flush();
 void _lerp_panic(char *file, int line, char *format, ...);
 #define lerp_panic(...)     _lerp_panic(__FILE__, __LINE__, __VA_ARGS__)
 
-#else // DEBUG_PORT
+#else // DEBUG_UART or DEBUG_CDC
 
 #define debug_printf(...)
 #define debug_putch(...)
@@ -69,6 +48,6 @@ void _lerp_panic(char *file, int line, char *format, ...);
 #define debug_poll()
 #define lerp_panic(...)     panic("")
 
-#endif // DEBUG_PORT
+#endif // DEBUG_UART or DEBUG_CDC
 #endif // __LERP_DEBUG_H
 

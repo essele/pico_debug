@@ -7,7 +7,7 @@
  * 
  * @copyright Copyright (c) 2022
  * 
- * Circular Buffer implementation with blocking...
+ * Circular Buffer implementation
  * 
  */
 
@@ -30,9 +30,11 @@ struct circ {
     // variables
     uint8_t     *head;              // where do we write to
     uint8_t     *tail;              // where to we read from
- 
+    
     // Flags
-    int         full;               // keep track if we are full or empty
+    int         flush;              // flag to signal interactive flush needed
+    int         full;               // are we full?
+    int         last;               // flag to signal the last byte in the stream is "last"
 };
 
 /**
@@ -46,7 +48,7 @@ struct circ {
                                             .size = sz, \
                                             .head = _c_data_##name, \
                                             .tail = _c_data_##name, \
-                                            .full = 0 }; \
+                                            .full = 0, .flush = 0, .last = 0 }; \
                                         struct circ *name = &_c_circ_##name;
 
 void circ_init(struct circ *c, uint8_t *data, int len);
@@ -82,7 +84,6 @@ static inline int circ_space(struct circ *c) {
 }
 
 static inline int circ_space_before_wrap(struct circ *c) {
-    if (c->tail < c->head) return 0;
     return MIN(circ_space(c), c->end - c->head);
 }
 
@@ -280,6 +281,23 @@ static inline int circ_casecompare(struct circ *c, uint8_t *bytes, int count) {
 static inline void circ_clean(struct circ *c) {
     c->head = c->tail = c->data;
     c->full = 0;
+    c->last = 0;
+    c->flush = 0;
 }
+
+
+static inline void circ_set_last(struct circ *c, int v) {
+    c->last = v;
+}
+
+/**
+ * @brief Set the flush flag in the given circular buffer
+ * 
+ * @param c 
+ */
+static inline void circ_set_flush(struct circ *c, int v) {
+    c->flush = v;
+}
+
 
 #endif

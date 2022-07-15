@@ -9,6 +9,7 @@
 
 #include "lerp/task.h"
 #include "lerp/circ.h"
+#include "lerp/io.h"
 #include "lerp/debug.h"
 
 #include "swd.h"
@@ -17,8 +18,8 @@
 #include "uart.h"
 #include "tusb.h"
 #include "filedata.h"
-#include "io.h"
 #include "gdb.h"
+
 
 /**
  * @brief Main polling function called regularly by lerp_task
@@ -27,7 +28,7 @@
  * 
  */
 void main_poll() {
-    // make sure usb is running and we're processing data...
+    // make sure usb/wifi is running and we're processing data...
     io_poll();
 
     // make sure the PIO blocks are managed...
@@ -51,6 +52,11 @@ int main() {
     // Initialise the PIO SWD system...
     if (swd_init() != SWD_OK)
         lerp_panic("unable to init SWD");
+
+    // Experiment with wireless on the pico-w
+    //io_init();
+
+    cmdline_init();
 
     // Initialise the UART
     dbg_uart_init();

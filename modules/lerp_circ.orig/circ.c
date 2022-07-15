@@ -16,8 +16,9 @@ void circ_init(struct circ *c, uint8_t *data, int len) {
     c->data = data;
     c->end = data + len;
     c->head = c->tail = c->data;
+    c->last = 0;
     c->size = len;
-    c->full = 0;
+    c->flush = 0;
 }
 
 
