@@ -32,6 +32,9 @@ add_executable(pico-debug
 
     cmdline.c cmdline.h
     utils.c utils.h
+
+    config/config.h
+    config/config.c
     
     filedata.c filedata.h
 
@@ -70,6 +73,8 @@ add_subdirectory(modules/lerp_circ)
 add_subdirectory(modules/lerp_debug)
 add_subdirectory(modules/lerp_io)
 add_subdirectory(modules/lerp_interact)
+add_subdirectory(modules/lerp_flash)
+add_subdirectory(modules/lerp_tokeniser)
 
 target_compile_definitions(pico-debug PRIVATE
   # We don't want the default alarm pool (and the IRQ's associated!)
@@ -130,4 +135,6 @@ target_link_libraries(pico-debug
   lerp_io
   lerp_debug
   lerp_interact
+  lerp_flash
+  lerp_tokeniser
 )

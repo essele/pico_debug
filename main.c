@@ -12,6 +12,8 @@
 #include "lerp/io.h"
 #include "lerp/debug.h"
 
+#include "config/config.h"
+
 #include "swd.h"
 #include "adi.h"
 #include "flash.h"
@@ -19,6 +21,9 @@
 #include "tusb.h"
 #include "filedata.h"
 #include "gdb.h"
+#include "cmdline.h"
+
+#include "pico/cyw43_arch.h"
 
 
 /**
@@ -46,6 +51,9 @@ int main() {
     // Take us to 150Mhz (for future rmii support)
     set_sys_clock_khz(150 * 1000, true);
 
+    // Initialise the configuration system
+    config_init();
+
     // Initialise the USB stack...
     tusb_init();
 
@@ -63,6 +71,14 @@ int main() {
 
     // Create the GDB server task..
     gdb_init();
+
+    // See if we have enough information to start the wifi...
+    // This is horrible here, needs to be a separate func/file with wifi/net related stuff.
+    if (*cf->main->wifi.ssid && *cf->main->wifi.creds) {
+        cyw43_arch_wifi_connect_async(cf->main->wifi.ssid, cf->main->wifi.creds, CYW43_AUTH_WPA2_AES_PSK);
+    }
+
+
 
     // And start the scheduler...
     leos_init(main_poll);

@@ -1,0 +1,44 @@
+
+
+swd.speed:
+	type=uint32_t
+	default=25000
+	min=100
+	max=25000
+	help="sets the speed of the SWD interface"
+
+swd.pinclk:
+	type=uint32_t
+	default=21
+	min=1
+	max=32
+	help="sets the CLK pin of the SWD interface"
+
+swd.pindata:
+	type=uint32_t
+	default=22
+	min=1
+	max=32
+	help="sets the DATA pin of the SWD interface"
+
+wifi.ssid:
+	type=string
+	default=""
+	min=0
+	max=32
+	help="the SSID to use for the wifi connection"
+
+wifi.pass:
+	type=string
+	default=""
+	min=0
+	max=32
+	help="the password to use for the wifi connection"
+
+ip.dhcp.enable:
+	type=boolean
+	default=true
+
+ip.one.two.three.four.fred:
+	bla=1
+
