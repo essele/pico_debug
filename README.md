@@ -6,6 +6,7 @@ A reimagined picoprobe -- much faster debugging/flashing for RP2040 based device
 
 This is very much work-in-progress and will develop over time, currently working is:
 
+- Works over USB or Wifi (on the Pico W)
 - PIO based SWD mechanism
 - SWD non-success checking in PIO stopping unneccessary delay
 - Clockable up to 25Mhz (over 6" jumper leads!)
@@ -17,6 +18,7 @@ This is very much work-in-progress and will develop over time, currently working
 - Small memory cache for optimising GDB reads, significantly improves stepping performance.
 - Efficient co-operative multitasking speeds up transfers and general interaction.
 - Orders of magnitude better performance
+- Simple command line interface for setting parameters (eg. wifi ssid)
 - NOWHERE NEAR COMPLETE OR PROPERLY TESTED - USE AT YOUR OWN RISK
 
 Still to do:
@@ -132,6 +134,8 @@ This debugger actually presents three serial interfaces (USB CDC) to the host, o
 The debug port has a 4K circular buffer that it uses to keep any debug output, if you connect to that port with a serial/terminal program it will output anything it has bufferred before becoming more real time, so if something stops working you can connect to it and see what has happened, you don't need to be connected all the time. (Note: debugging messages are not of a high quality! Currently.)
 
 On Windows I did note that you can look at the "bus reported device descriptor" in the serial port properties and you'll see the text I've defined for each port (debug-gdb, debug-uart, and debug-debug) so that may help making sure you connect to the right one.
+
+NOTE: the newest versions now include wifi support which has slighty changed the above. There are still three ports, but the third one is now a combined command-line interface and debug output. You can also connect to each via either USB or WIFI (USB will prevail) and you can mix and match between ports, so you could have GDB on USB and the debug output on Wifi for example. I will add more details shortly, but for now use port 3333, 3334, and 3335 to connect via wifi once you have configured the wifi (the commands are: set wifi.ssid and set wifi.creds, join, status, and save.)
 
 ## Code and Releases
 
