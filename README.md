@@ -149,7 +149,7 @@ Any comments welcome ... but please bear in mind I do this for fun, I'm not an e
 
 ## FAQ
 
-# Permission denied on /dev/ttyACM0,ttyACM1,ttyACM2
+### Permission denied on /dev/ttyACM0,ttyACM1,ttyACM2
 
 You can add a udev-rule for this with like /etc/udev/rules.d/99-pico-debug.rules:
 ```
