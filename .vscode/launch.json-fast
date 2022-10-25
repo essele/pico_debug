@@ -29,7 +29,10 @@
 	    // immediately after flashing. This means that by the time any ram based
 	    // breakpoints are applied the relevant stuff is in RAM.
 	    "postLaunchCommands": [
-		"break main", "continue", "clear main",
+		"break main", 
+		"continue",
+		"shell sleep 1",
+		"clear main",
 //		"monitor get_to_main"
 	    ],
             // With breakAfterReset we have a consistent approach so can use the same
@@ -38,6 +41,7 @@
 //		  "monitor get_to_main"
 		"break main",
 		"continue",
+		"shell sleep 1",
 		"clear main"
             ]
 
