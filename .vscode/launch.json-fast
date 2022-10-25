@@ -10,7 +10,7 @@
             "servertype": "external",
             // This may need to be arm-none-eabi-gdb depending on your system
             "gdbPath" : "gdb-multiarch",
-	    "gdbTarget" : "/dev/ttyACM2",
+	    "gdbTarget" : "/dev/ttyACM0",
             "device": "RP2040",
             "configFiles": [
                 "interface/picoprobe.cfg",
@@ -29,7 +29,10 @@
 	    // immediately after flashing. This means that by the time any ram based
 	    // breakpoints are applied the relevant stuff is in RAM.
 	    "postLaunchCommands": [
-		"break main", "continue", "clear main",
+		"break main", 
+		"continue",
+		"shell sleep 1",
+		"clear main",
 //		"monitor get_to_main"
 	    ],
             // With breakAfterReset we have a consistent approach so can use the same
@@ -38,6 +41,7 @@
 //		  "monitor get_to_main"
 		"break main",
 		"continue",
+		"shell sleep 1",
 		"clear main"
             ]
 

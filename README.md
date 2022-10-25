@@ -146,3 +146,21 @@ I'll try to keep a reasonably up-to-date pico-debug.uf2 file around, but I'll on
 The other project I'm working on already has nice and stable ethernet (rmii) and PoE, and I think a debugger with ethernet and poe would be really nice ... so I may look at that, although I do need to get back to that first project ... that's why I created this!
 
 Any comments welcome ... but please bear in mind I do this for fun, I'm not an expert, lots of things will be wrong.
+
+## FAQ
+
+### Permission denied on /dev/ttyACM0,ttyACM1,ttyACM2
+
+You can add a udev-rule for this with like /etc/udev/rules.d/99-pico-debug.rules:
+```
+ACTION!="add|change", GOTO="pico_debug_end"
+SUBSYSTEM!="usb|tty|hidraw", GOTO="pico_debug_end"
+
+# fast picoprobe
+ATTRS{idVendor}=="3333", ATTRS{idProduct}=="1111", MODE="664", GROUP="plugdev"
+```
+
+Reload the config with:
+```
+udevadm control -R
+```
