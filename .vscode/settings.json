@@ -31,7 +31,12 @@
         "rmii_config.h": "c",
         "conn.h": "c",
         "ssi.h": "c",
-        "flash.h": "c"
+        "flash.h": "c",
+        "printf.h": "c",
+        "stdlib.h": "c",
+        "pico.h": "c",
+        "platform.h": "c",
+        "error.h": "c"
     },
     "cortex-debug.variableUseNaturalFormat": false,
     "cortex-debug.registerUseNaturalFormat": false

@@ -44,7 +44,9 @@ struct io *io_init(int cdc_port, int tcp_port, int buf_size);
 
 void io_poll();
 int io_get_byte(struct io *io);
+int io_get_byte_nb(struct io *io);
 int io_put_byte(struct io *io, uint8_t ch);
+int io_put_bytes(struct io *io, uint8_t *data, int len);
 int io_put_hexbyte(struct io *io, uint8_t b);
 int io_printf(struct io *io, char *format, ...);
 int io_aprintf(struct io *io, char *format, va_list args);

@@ -1259,11 +1259,20 @@ int check_cores() {
 }
 
 
-
-
-int dp_init() {
+int dp_force_init() {
     CHECK_OK(dp_initialise());
     CHECK_OK(core_select(0));
     return SWD_OK;
 }
 
+int dp_init() {
+    static bool initialized = false;
+    if (!initialized) {
+        int rv = dp_force_init();
+        if (rv == SWD_OK) {
+            initialized = true;
+        }
+        return rv;
+    }
+    return SWD_OK;
+}

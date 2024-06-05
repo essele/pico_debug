@@ -46,6 +46,7 @@ void main_poll() {
     debug_poll();
 }
 
+void prof_init();
 
 int main() {
     // Take us to 150Mhz (for future rmii support)
@@ -70,15 +71,15 @@ int main() {
     dbg_uart_init();
 
     // Create the GDB server task..
-    gdb_init();
+    //gdb_init();
+
+    prof_init();
 
     // See if we have enough information to start the wifi...
     // This is horrible here, needs to be a separate func/file with wifi/net related stuff.
-    if (*cf->main->wifi.ssid && *cf->main->wifi.creds) {
-        cyw43_arch_wifi_connect_async(cf->main->wifi.ssid, cf->main->wifi.creds, CYW43_AUTH_WPA2_AES_PSK);
-    }
-
-
+    //if (*cf->main->wifi.ssid && *cf->main->wifi.creds) {
+    //    cyw43_arch_wifi_connect_async(cf->main->wifi.ssid, cf->main->wifi.creds, CYW43_AUTH_WPA2_AES_PSK);
+    //}
 
     // And start the scheduler...
     leos_init(main_poll);

@@ -38,6 +38,10 @@
 #define USBD_CDC_2_EP_OUT (0x04)
 #define USBD_CDC_2_EP_IN (0x86)
 
+#define USBD_CDC_3_EP_CMD (0x87)
+#define USBD_CDC_3_EP_OUT (0x08)
+#define USBD_CDC_3_EP_IN (0x89)
+
 #define USBD_CDC_CMD_MAX_SIZE (8)
 #define USBD_CDC_IN_OUT_MAX_SIZE (64)
 
@@ -48,6 +52,7 @@
 #define USBD_STR_CDC0 (0x04)
 #define USBD_STR_CDC1 (0x05)
 #define USBD_STR_CDC2 (0x06)
+#define USBD_STR_CDC3 (0x07)
 
 //
 // Officially, according to the USB specs, we shoul duse TUSB_CLASS_MISC, SUBCLASS_COMMON, and PROTOCOL_IAD
@@ -85,6 +90,8 @@ enum
   ITF_NUM_CDC_1_DATA,
   ITF_NUM_CDC_2,
   ITF_NUM_CDC_2_DATA,
+  ITF_NUM_CDC_3,
+  ITF_NUM_CDC_3_DATA,
   ITF_NUM_TOTAL
 };
 
@@ -104,6 +111,9 @@ uint8_t const usbd_desc_cfg[] =
 
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_2, USBD_STR_CDC2, USBD_CDC_2_EP_CMD,
         USBD_CDC_CMD_MAX_SIZE, USBD_CDC_2_EP_OUT, USBD_CDC_2_EP_IN, USBD_CDC_IN_OUT_MAX_SIZE),
+
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_3, USBD_STR_CDC3, USBD_CDC_3_EP_CMD,
+        USBD_CDC_CMD_MAX_SIZE, USBD_CDC_3_EP_OUT, USBD_CDC_3_EP_IN, USBD_CDC_IN_OUT_MAX_SIZE),
 };
 
 
@@ -159,7 +169,7 @@ const uint16_t *tud_descriptor_string_cb(uint8_t index, __unused uint16_t langid
             break;
 
         case USBD_STR_SERIAL:
-            len = string_to_descriptor("11223344", desc_str);
+            len = string_to_descriptor("pdebug", desc_str);
             break;
 
         case USBD_STR_CDC0:
@@ -172,6 +182,10 @@ const uint16_t *tud_descriptor_string_cb(uint8_t index, __unused uint16_t langid
 
         case USBD_STR_CDC2:
             len = string_to_descriptor("debug-debug", desc_str);
+            break;
+
+        case USBD_STR_CDC3:
+            len = string_to_descriptor("debug-prof", desc_str);
             break;
 
         default:

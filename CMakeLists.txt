@@ -30,6 +30,8 @@ add_executable(pico-debug
     gdb.c gdb.h
     breakpoint.c breakpoint.h
 
+    prof.c
+
     cmdline.c cmdline.h
     utils.c utils.h
 
@@ -102,8 +104,11 @@ target_compile_definitions(pico-debug PRIVATE
   CMD_CDC=2
   CMD_TCP=3335
 
+  PROF_CDC=0
+  PROF_TCP=0
+
   # Debug on CDC2
-  # DEBUG_CDC=2
+  DEBUG_CDC=2
   DEBUG_BUF=1
 )
 

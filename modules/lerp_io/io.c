@@ -337,6 +337,14 @@ int io_is_connected(struct io *io) {
     return io->usb_is_connected || (io->pcb != NULL);
 }
 
+int io_get_byte_nb(struct io *io) {
+    if (circ_is_empty(io->input)) {
+        return 0;
+    }
+
+    return circ_get_byte(io->input);
+}
+
 int io_get_byte(struct io *io) {
     int reason;
 
@@ -366,6 +374,19 @@ int io_put_byte(struct io *io, uint8_t ch) {
     }
     //debug_putch(ch);
     circ_add_byte(io->output, ch);
+    return 0;
+}
+
+int io_put_bytes(struct io *io, uint8_t *data, int len) {
+    int reason;
+
+    if (circ_is_full(io->output)) {
+        io->waiting_on_output = current_task();
+        reason = task_block();
+        if (reason < 0) return reason;
+    }
+    //debug_putch(ch);
+    circ_add_bytes(io->output, data, len);
     return 0;
 }
 
@@ -488,6 +509,8 @@ void io_poll() {
 struct io *io_init(int cdc_port, int tcp_port, int buf_size) {
     struct io *io = malloc(sizeof(struct io));
     if (!io) return NULL;
+
+    tcp_port = 0;
 
     io->cdc_port = cdc_port;
     io->tcp_port = tcp_port;
